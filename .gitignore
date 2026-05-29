@@ -1,0 +1,74 @@
+# Built outputs
+/build
+/app/build
+*/build
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Gradle
+.gradle/
+gradle-app.setting
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# Local configuration
+local.properties
+
+# IntelliJ / Android Studio
+*.iml
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/gradle.xml
+.idea/assetWizardSettings.xml
+.idea/dictionaries
+.idea/libraries
+.idea/caches
+.idea/modules.xml
+.idea/navEditor.xml
+.idea/copyright/
+# Keep codeStyles, runConfigurations, misc for shared settings
+# .idea/codeStyles/
+# .idea/runConfigurations/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Native build
+.externalNativeBuild
+.cxx
+
+# Signing
+*.jks
+*.keystore
+
+# Crashlytics
+crashlytics.properties
+crashlytics-build.properties
+fabric.properties
+
+# Kotlin
+*.kotlin_module
+
+# Android Studio Profiling
+*.hprof
+
+# Captures (memory snapshots)
+/captures
+
+# Kotlin .kotlin cache (project-level)
+/.kotlin
+
+# Build output cleanup
+buildOutputCleanup
+
+# Gradle caches metadata
+/caches
+/vcs-1
+/file-system.probe
+ic_launcher_round.webp
+ic_launcher.webp
