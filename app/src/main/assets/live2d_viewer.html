@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <style>
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #f0f5f6;
+      touch-action: none;
+    }
+
+    canvas,
+    #present {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: #f0f5f6;
+    }
+
+    #present {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+    }
+
+    .webgl-source {
+      position: fixed;
+      inset: 0;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    #fallback {
+      position: fixed;
+      left: 18px;
+      right: 18px;
+      bottom: 22px;
+      padding: 10px 12px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      background: rgba(20, 20, 22, 0.58);
+      color: rgba(255, 255, 255, 0.88);
+      font: 13px/1.45 system-ui, sans-serif;
+      display: none;
+      z-index: 3;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="present"></canvas>
+  <div id="fallback"></div>
+
+  <script src="utils/live2d/pixi.min.js"></script>
+  <script src="utils/live2d/live2dcubismcore.min.js"></script>
+  <script src="utils/live2d/live2d.min.js"></script>
+  <script src="utils/live2d/index.min.js"></script>
+  <script>
+    const MODEL_URL = "live2dmodels/steinsGateKurisuNew/kurisu.model3.json";
+    const RANDOM_MOTIONS = ["neutral", "random1", "random2", "random3", "random4", "random5"];
+
+    const fallback = document.getElementById("fallback");
+    const present = document.getElementById("present");
+    const presentContext = present.getContext("2d", { alpha: false });
+    let readBuffer = null;
+    let flippedBuffer = null;
+    let imageData = null;
+
+    function report(message) {
+      console.log("[AmaduseLive2D] " + message);
+    }
+
+    function showFallback(message) {
+      fallback.textContent = message;
+      fallback.style.display = "block";
+      console.error("[AmaduseLive2D] " + message);
+    }
+
+    function resizePresenter(app) {
+      const width = app.renderer.width;
+      const height = app.renderer.height;
+
+      if (present.width !== width || present.height !== height) {
+        present.width = width;
+        present.height = height;
+        readBuffer = new Uint8Array(width * height * 4);
+        flippedBuffer = new Uint8ClampedArray(width * height * 4);
+        imageData = presentContext.createImageData(width, height);
+      }
+    }
+
+    function presentWebglFrame(app) {
+      const renderer = app.renderer;
+      const gl = renderer.gl;
+      const width = renderer.width;
+      const height = renderer.height;
+
+      if (!gl || !readBuffer || !imageData) {
+        return;
+      }
+
+      renderer.render(app.stage);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, readBuffer);
+      for (let y = 0; y < height; y += 1) {
+        const sourceStart = (height - 1 - y) * width * 4;
+        const sourceEnd = sourceStart + width * 4;
+        flippedBuffer.set(readBuffer.subarray(sourceStart, sourceEnd), y * width * 4);
+      }
+      imageData.data.set(flippedBuffer);
+      presentContext.putImageData(imageData, 0, 0);
+    }
+
+    function fitModel(app, model) {
+      const screenWidth = app.renderer.width;
+      const screenHeight = app.renderer.height;
+      const sourceWidth = Math.max(model.width / Math.max(model.scale.x, 0.0001), 1);
+      const sourceHeight = Math.max(model.height / Math.max(model.scale.y, 0.0001), 1);
+      const scale = Math.min(screenWidth / sourceWidth * 0.9, screenHeight / sourceHeight * 0.95);
+
+      if (model.anchor) {
+        model.anchor.set(0.5, 0.5);
+        model.position.set(screenWidth * 0.5, screenHeight * 0.52);
+      } else {
+        const bounds = model.getLocalBounds();
+        model.pivot.set(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        model.position.set(screenWidth * 0.5, screenHeight * 0.52);
+      }
+      model.scale.set(scale);
+      report("fit width=" + model.width.toFixed(1) + " height=" + model.height.toFixed(1) + " scale=" + scale.toFixed(4));
+    }
+
+    async function boot() {
+      report("boot");
+      if (!window.PIXI || !PIXI.live2d || !PIXI.live2d.Live2DModel) {
+        showFallback("Live2D runtime was not loaded.");
+        return;
+      }
+
+      PIXI.live2d.config.sound = false;
+      PIXI.live2d.config.logLevel = PIXI.live2d.config.LOG_LEVEL_ERROR;
+
+      const app = new PIXI.Application({
+        backgroundAlpha: 1,
+        backgroundColor: 0xf0f5f6,
+        antialias: true,
+        autoStart: true,
+        preserveDrawingBuffer: true,
+        resizeTo: window
+      });
+
+      app.view.className = "webgl-source";
+      document.body.appendChild(app.view);
+      report("renderer ready " + app.renderer.width + "x" + app.renderer.height + " type=" + app.renderer.type);
+      resizePresenter(app);
+
+      const model = await PIXI.live2d.Live2DModel.from(MODEL_URL, {
+        autoInteract: true,
+        motionPreload: PIXI.live2d.MotionPreloadStrategy.NONE
+      });
+      report("model loaded");
+
+      app.stage.addChild(model);
+      fitModel(app, model);
+      presentWebglFrame(app);
+
+      window.addEventListener("resize", () => {
+        resizePresenter(app);
+        fitModel(app, model);
+      });
+
+      let lastPresented = 0;
+      function renderLoop(time) {
+        if (time - lastPresented > 41) {
+          presentWebglFrame(app);
+          lastPresented = time;
+        }
+        requestAnimationFrame(renderLoop);
+      }
+      requestAnimationFrame(renderLoop);
+
+      setInterval(() => {
+        const group = RANDOM_MOTIONS[Math.floor(Math.random() * RANDOM_MOTIONS.length)];
+        try {
+          model.motion(group, 0, PIXI.live2d.MotionPriority.IDLE);
+        } catch (_) {
+          // Some models omit optional motion groups; idle physics still continues.
+        }
+      }, 9000);
+    }
+
+    boot().catch((error) => {
+      showFallback(error && error.message ? error.message : "Live2D failed to start.");
+      console.error(error);
+    });
+  </script>
+</body>
+</html>

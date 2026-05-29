@@ -1,8 +1,16 @@
 package com.sg.amaduse
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
+import android.view.View
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -41,9 +49,11 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -71,6 +81,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Alarm
@@ -101,6 +112,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -108,6 +120,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -116,6 +129,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -133,8 +147,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.sg.amaduse.ui.theme.AmaduseMotion
 import com.sg.amaduse.ui.theme.AmaduseStyle
 import com.sg.amaduse.ui.theme.AmaduseTheme
@@ -142,6 +158,7 @@ import com.sg.amaduse.ui.theme.glassLayer
 import com.sg.amaduse.ui.theme.iconGlass
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -410,7 +427,7 @@ private fun AmaduseApp() {
     var settingsVisible by remember { mutableStateOf(false) }
     var settingsSheetMode by remember { mutableStateOf(SettingsSheetMode.Full) }
     var toolsVisible by remember { mutableStateOf(false) }
-    var characterExpanded by remember { mutableStateOf(true) }
+    var characterExpanded by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
     val attachments = remember { mutableStateListOf<ComposerAttachment>() }
     val messages = remember(context) {
@@ -473,7 +490,7 @@ private fun AmaduseApp() {
                             messages.clear()
                             saveChatRecords(context, records)
                             saveChatMessages(context, newRecord.id, messages)
-                            characterExpanded = true
+                            characterExpanded = false
                             appScreen = AppScreen.Chat
                         },
                         onRecordClick = { record ->
@@ -506,7 +523,7 @@ private fun AmaduseApp() {
                             messages.clear()
                             saveChatRecords(context, records)
                             saveChatMessages(context, newRecord.id, messages)
-                            characterExpanded = true
+                            characterExpanded = false
                         },
                         onModeChange = {
                             selectedMode = it
@@ -706,32 +723,38 @@ private fun ChatScreen(
             onModelSelect = onModelSelect,
             onModelConfigure = onModelConfigure,
         )
-        MainConversationArea(
+        Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
-            messages = messages,
-            persona = selectedPersona,
-            characterExpanded = characterExpanded,
-            recording = recording,
-            onCharacterToggle = onCharacterToggle,
-            onToggleThinking = onToggleThinking,
-        )
-        ChatComposer(
-            draft = draft,
-            attachments = attachments,
-            toolsVisible = toolsVisible,
-            recording = recording,
-            sending = sending,
-            onDraftChange = onDraftChange,
-            onToolsToggle = onToolsToggle,
-            onImagePick = onImagePick,
-            onFilePick = onFilePick,
-            onVoiceToggle = onVoiceToggle,
-            onRemoveAttachment = onRemoveAttachment,
-            onToolClick = onToolClick,
-            onSend = onSend,
-        )
+        ) {
+            MainConversationArea(
+                modifier = Modifier.matchParentSize(),
+                messages = messages,
+                persona = selectedPersona,
+                characterExpanded = characterExpanded,
+                recording = recording,
+                bottomOverlayPadding = 78.dp,
+                onCharacterToggle = onCharacterToggle,
+                onToggleThinking = onToggleThinking,
+            )
+            ChatComposer(
+                modifier = Modifier.align(Alignment.BottomCenter),
+                draft = draft,
+                attachments = attachments,
+                toolsVisible = toolsVisible,
+                recording = recording,
+                sending = sending,
+                onDraftChange = onDraftChange,
+                onToolsToggle = onToolsToggle,
+                onImagePick = onImagePick,
+                onFilePick = onFilePick,
+                onVoiceToggle = onVoiceToggle,
+                onRemoveAttachment = onRemoveAttachment,
+                onToolClick = onToolClick,
+                onSend = onSend,
+            )
+        }
     }
 }
 
@@ -1505,45 +1528,216 @@ private fun MainConversationArea(
     persona: PersonaPreset,
     characterExpanded: Boolean,
     recording: Boolean,
+    bottomOverlayPadding: Dp = 0.dp,
     onCharacterToggle: () -> Unit,
     onToggleThinking: (Int) -> Unit,
 ) {
-    val stageHeight by animateDpAsState(
-        targetValue = if (characterExpanded) 238.dp else 72.dp,
-        animationSpec = spring(dampingRatio = 0.86f, stiffness = 260f),
-        label = "stage-height",
-    )
+    val transcriptExpanded = characterExpanded
+    val dark = isSystemInDarkTheme()
 
-    Column(
-        modifier = modifier.padding(horizontal = AmaduseStyle.ScreenPadding),
-    ) {
-        AnimatedContent(
-            targetState = characterExpanded,
-            transitionSpec = {
-                fadeIn(tween(AmaduseMotion.Default)) togetherWith
-                    fadeOut(tween(AmaduseMotion.Fast)) using
-                    SizeTransform(clip = false)
-            },
-            label = "character-stage-mode",
-        ) { expanded ->
-            CharacterStage(
+    BoxWithConstraints(modifier = modifier) {
+        val collapsedHeight = maxHeight * 0.34f
+        val expandedHeight = maxHeight * 0.84f
+        val transcriptHeight by animateDpAsState(
+            targetValue = if (transcriptExpanded) expandedHeight else collapsedHeight,
+            animationSpec = spring(dampingRatio = 0.86f, stiffness = 240f),
+            label = "transcript-height",
+        )
+
+        Live2dStage(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    brush = Brush.verticalGradient(
+                        colors = if (dark) {
+                            listOf(Color(0xFF09090B), Color(0xFF131517), Color(0xFF080809))
+                        } else {
+                            listOf(Color(0xFFEFF3F2), Color(0xFFE8ECEF), Color(0xFFF7F7F5))
+                        },
+                    ),
+                ),
+        )
+
+        AnimatedVisibility(
+            visible = transcriptExpanded,
+            enter = fadeIn(tween(AmaduseMotion.Default)),
+            exit = fadeOut(tween(AmaduseMotion.Fast)),
+        ) {
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(stageHeight),
-                persona = persona,
-                expanded = expanded,
-                recording = recording,
-                onToggle = onCharacterToggle,
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = if (dark) 0.18f else 0.08f)),
             )
         }
+
+        Live2dStatusBadge(
+            persona = persona,
+            recording = recording,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = AmaduseStyle.ScreenPadding, top = 12.dp),
+        )
+
+        FloatingTranscriptPanel(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(transcriptHeight)
+                .padding(
+                    start = AmaduseStyle.ScreenPadding,
+                    end = AmaduseStyle.ScreenPadding,
+                    top = if (transcriptExpanded) 10.dp else 6.dp,
+                    bottom = bottomOverlayPadding,
+                ),
+            messages = messages,
+            expanded = transcriptExpanded,
+            onExpand = { if (!transcriptExpanded) onCharacterToggle() },
+            onCollapse = { if (transcriptExpanded) onCharacterToggle() },
+            onToggleThinking = onToggleThinking,
+        )
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun Live2dStage(modifier: Modifier = Modifier) {
+    AndroidView(
+        modifier = modifier,
+        factory = { context ->
+            WebView(context).apply {
+                setBackgroundColor(android.graphics.Color.rgb(240, 245, 246))
+                isVerticalScrollBarEnabled = false
+                isHorizontalScrollBarEnabled = false
+                overScrollMode = View.OVER_SCROLL_NEVER
+                webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                        Log.d(
+                            "AmaduseLive2D",
+                            "${consoleMessage.message()} (${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})",
+                        )
+                        return true
+                    }
+                }
+                webViewClient = WebViewClient()
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.allowFileAccess = true
+                settings.allowContentAccess = true
+                settings.allowFileAccessFromFileURLs = true
+                settings.allowUniversalAccessFromFileURLs = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                settings.cacheMode = WebSettings.LOAD_DEFAULT
+                loadUrl("file:///android_asset/live2d_viewer.html")
+            }
+        },
+    )
+}
+
+@Composable
+private fun Live2dStatusBadge(
+    persona: PersonaPreset,
+    recording: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .glassLayer(
+                shape = RoundedCornerShape(999.dp),
+                dark = isSystemInDarkTheme(),
+            )
+            .padding(horizontal = 11.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        StatusDot(active = recording)
+        Text(
+            text = persona.name,
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun FloatingTranscriptPanel(
+    modifier: Modifier = Modifier,
+    messages: List<ChatMessage>,
+    expanded: Boolean,
+    onExpand: () -> Unit,
+    onCollapse: () -> Unit,
+    onToggleThinking: (Int) -> Unit,
+) {
+    val shape = RoundedCornerShape(
+        topStart = if (expanded) 28.dp else 22.dp,
+        topEnd = if (expanded) 28.dp else 22.dp,
+        bottomStart = 22.dp,
+        bottomEnd = 22.dp,
+    )
+    val containerModifier = if (expanded) {
+        Modifier.glassLayer(shape = shape, dark = isSystemInDarkTheme())
+    } else {
+        Modifier
+    }
+
+    Column(
+        modifier = modifier
+            .then(containerModifier)
+            .padding(horizontal = if (expanded) 10.dp else 0.dp, vertical = if (expanded) 8.dp else 0.dp),
+    ) {
+        TranscriptGrabber(
+            expanded = expanded,
+            onExpand = onExpand,
+            onCollapse = onCollapse,
+            modifier = Modifier.fillMaxWidth(),
+        )
         ChatTranscript(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
             messages = messages,
-            onExpandCharacter = { if (!characterExpanded) onCharacterToggle() },
-            onCollapseCharacter = { if (characterExpanded) onCharacterToggle() },
+            expanded = expanded,
             onToggleThinking = onToggleThinking,
+        )
+    }
+}
+
+@Composable
+private fun TranscriptGrabber(
+    expanded: Boolean,
+    onExpand: () -> Unit,
+    onCollapse: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var verticalDrag by remember { mutableFloatStateOf(0f) }
+
+    Box(
+        modifier = modifier
+            .height(if (expanded) 26.dp else 22.dp)
+            .pointerInput(expanded) {
+                detectVerticalDragGestures(
+                    onVerticalDrag = { _, dragAmount -> verticalDrag += dragAmount },
+                    onDragEnd = {
+                        if (verticalDrag < -36f) {
+                            onExpand()
+                        } else if (verticalDrag > 40f) {
+                            onCollapse()
+                        }
+                        verticalDrag = 0f
+                    },
+                    onDragCancel = { verticalDrag = 0f },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .width(if (expanded) 48.dp else 42.dp)
+                .height(4.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = if (expanded) 0.28f else 0.38f)),
         )
     }
 }
@@ -1754,57 +1948,172 @@ private fun AgentSilhouette(
 private fun ChatTranscript(
     modifier: Modifier = Modifier,
     messages: List<ChatMessage>,
-    onExpandCharacter: () -> Unit,
-    onCollapseCharacter: () -> Unit,
+    expanded: Boolean,
     onToggleThinking: (Int) -> Unit,
 ) {
-    val listState = rememberLazyListState()
-    var dragAmount by remember { mutableFloatStateOf(0f) }
+    val listState: LazyListState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
     val hasStreamingMessage = messages.any { it.streaming }
+    val lastMessage = messages.lastOrNull()
+    val isAtBottom by remember {
+        derivedStateOf { listState.isAtTranscriptBottom() }
+    }
+    var userDetachedFromBottom by remember { mutableStateOf(false) }
+    var autoScrolling by remember { mutableStateOf(false) }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+    suspend fun scrollToTranscriptBottom(animated: Boolean) {
+        autoScrolling = true
+        try {
+            val bottomIndex = transcriptBottomItemIndex(
+                messageCount = messages.size,
+                hasStreamingMessage = hasStreamingMessage,
+            )
+            if (animated) {
+                listState.animateScrollToItem(bottomIndex)
+            } else {
+                listState.scrollToItem(bottomIndex)
+            }
+        } finally {
+            autoScrolling = false
         }
     }
 
-    LazyColumn(
-        modifier = modifier
-            .pointerInput(Unit) {
-                detectVerticalDragGestures(
-                    onVerticalDrag = { _, dragDelta -> dragAmount += dragDelta },
-                    onDragEnd = {
-                        if (dragAmount < -70f) {
-                            onCollapseCharacter()
-                        } else if (dragAmount > 90f && listState.firstVisibleItemIndex == 0) {
-                            onExpandCharacter()
-                        }
-                        dragAmount = 0f
-                    },
-                    onDragCancel = { dragAmount = 0f },
-                )
-            },
-        state = listState,
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.isAtTranscriptBottom() }
+            .collect { (isScrolling, atBottom) ->
+                if (isScrolling && !autoScrolling) {
+                    userDetachedFromBottom = true
+                }
+                if (atBottom) {
+                    userDetachedFromBottom = false
+                }
+            }
+    }
+
+    LaunchedEffect(
+        messages.size,
+        lastMessage?.text?.length,
+        lastMessage?.thinking?.length,
+        lastMessage?.streaming,
+        lastMessage?.thinkingExpanded,
+        hasStreamingMessage,
+        expanded,
     ) {
-        item {
-            ConversationDateDivider(text = "今天")
+        if (!userDetachedFromBottom || isAtBottom) {
+            scrollToTranscriptBottom(animated = false)
         }
-        itemsIndexed(messages) { index, message ->
-            MessageRow(
-                message = message,
-                onToggleThinking = { onToggleThinking(index) },
-            )
-        }
-        if (hasStreamingMessage) {
+    }
+
+    Box(modifier = modifier) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            state = listState,
+            contentPadding = PaddingValues(
+                horizontal = if (expanded) 2.dp else 0.dp,
+                vertical = if (expanded) 8.dp else 2.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(if (expanded) 14.dp else 10.dp),
+        ) {
             item {
-                TypingPreview()
+                ConversationDateDivider(text = "今天")
+            }
+            itemsIndexed(messages) { index, message ->
+                MessageRow(
+                    message = message,
+                    onToggleThinking = { onToggleThinking(index) },
+                )
+            }
+            if (hasStreamingMessage) {
+                item {
+                    TypingPreview()
+                }
+            }
+            item {
+                Spacer(modifier = Modifier.height(12.dp))
             }
         }
-        item {
-            Spacer(modifier = Modifier.height(12.dp))
+
+        AnimatedVisibility(
+            visible = !isAtBottom,
+            enter = fadeIn(tween(AmaduseMotion.Fast)) + slideInVertically { it / 2 },
+            exit = fadeOut(tween(AmaduseMotion.Fast)) + slideOutVertically { it / 2 },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 12.dp, bottom = 12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .glassLayer(
+                        shape = CircleShape,
+                        dark = isSystemInDarkTheme(),
+                    )
+                    .clickable {
+                        coroutineScope.launch {
+                            userDetachedFromBottom = false
+                            scrollToTranscriptBottom(animated = true)
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = "回到底部",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
         }
     }
+}
+
+private fun transcriptBottomItemIndex(
+    messageCount: Int,
+    hasStreamingMessage: Boolean,
+): Int {
+    return 1 + messageCount + if (hasStreamingMessage) 1 else 0
+}
+
+private fun LazyListState.isAtTranscriptBottom(): Boolean {
+    val visibleItems = layoutInfo.visibleItemsInfo
+    if (layoutInfo.totalItemsCount == 0 || visibleItems.isEmpty()) {
+        return true
+    }
+
+    val lastVisible = visibleItems.last()
+    return lastVisible.index >= layoutInfo.totalItemsCount - 1 &&
+        lastVisible.offset + lastVisible.size <= layoutInfo.viewportEndOffset + 8
+}
+
+private fun Modifier.chatBubbleLayer(
+    shape: Shape,
+    dark: Boolean,
+): Modifier {
+    val fill = if (dark) {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF151516).copy(alpha = 0.46f),
+                Color(0xFF151516).copy(alpha = 0.28f),
+            )
+        )
+    } else {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color.White.copy(alpha = 0.58f),
+                Color.White.copy(alpha = 0.34f),
+            ),
+        )
+    }
+    val stroke = if (dark) {
+        Color.White.copy(alpha = 0.14f)
+    } else {
+        Color.Black.copy(alpha = 0.06f)
+    }
+
+    return this
+        .clip(shape)
+        .background(fill)
+        .border(BorderStroke(AmaduseStyle.Hairline, stroke), shape)
 }
 
 @Composable
@@ -1843,29 +2152,28 @@ private fun AgentMessage(
     message: ChatMessage,
     onToggleThinking: () -> Unit,
 ) {
+    val shape = RoundedCornerShape(
+        topStart = 18.dp,
+        topEnd = 18.dp,
+        bottomStart = 6.dp,
+        bottomEnd = 18.dp,
+    )
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .animateContentSize(animationSpec = tween(AmaduseMotion.Default)),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.Start,
         verticalAlignment = Alignment.Top,
     ) {
-        Box(
-            modifier = Modifier
-                .size(30.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "A",
-                color = MaterialTheme.colorScheme.background,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold,
-            )
-        }
         Column(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .widthIn(max = 328.dp)
+                .chatBubbleLayer(
+                    shape = shape,
+                    dark = isSystemInDarkTheme(),
+                )
+                .padding(horizontal = 13.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1996,6 +2304,14 @@ private fun StreamingLinePlaceholder() {
 
 @Composable
 private fun UserMessage(message: ChatMessage) {
+    val dark = isSystemInDarkTheme()
+    val shape = RoundedCornerShape(
+        topStart = AmaduseStyle.BubbleRadius,
+        topEnd = AmaduseStyle.BubbleRadius,
+        bottomStart = AmaduseStyle.BubbleRadius,
+        bottomEnd = 6.dp,
+    )
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.End,
@@ -2003,13 +2319,12 @@ private fun UserMessage(message: ChatMessage) {
     ) {
         Surface(
             modifier = Modifier.widthIn(max = 308.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant,
+            color = if (dark) Color.White.copy(alpha = 0.09f) else Color.White.copy(alpha = 0.54f),
             contentColor = MaterialTheme.colorScheme.onSurface,
-            shape = RoundedCornerShape(
-                topStart = AmaduseStyle.BubbleRadius,
-                topEnd = AmaduseStyle.BubbleRadius,
-                bottomStart = AmaduseStyle.BubbleRadius,
-                bottomEnd = 6.dp,
+            shape = shape,
+            border = BorderStroke(
+                AmaduseStyle.Hairline,
+                if (dark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.05f),
             ),
         ) {
             Column(
@@ -2149,7 +2464,7 @@ private fun TypingPreview() {
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(999.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.36f))
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(5.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -2169,6 +2484,7 @@ private fun TypingPreview() {
 
 @Composable
 private fun ChatComposer(
+    modifier: Modifier = Modifier,
     draft: String,
     attachments: List<ComposerAttachment>,
     toolsVisible: Boolean,
@@ -2189,7 +2505,7 @@ private fun ChatComposer(
     val canSend = !sending && (draft.isNotBlank() || attachments.isNotEmpty())
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .imePadding()
             .navigationBarsPadding()
@@ -2217,13 +2533,7 @@ private fun ChatComposer(
 
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .glassLayer(
-                    shape = RoundedCornerShape(AmaduseStyle.ControlRadius),
-                    dark = isSystemInDarkTheme(),
-                )
-                .animateContentSize(animationSpec = tween(AmaduseMotion.Default))
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .fillMaxWidth(),
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -2233,113 +2543,126 @@ private fun ChatComposer(
                 active = toolsVisible,
                 onClick = onToolsToggle,
             )
-            Box(
+            Row(
                 modifier = Modifier
                     .weight(1f)
-                    .heightIn(min = 40.dp, max = 136.dp)
-                    .padding(horizontal = 4.dp, vertical = 5.dp),
-                contentAlignment = Alignment.CenterStart,
+                    .glassLayer(
+                        shape = RoundedCornerShape(AmaduseStyle.ControlRadius),
+                        dark = isSystemInDarkTheme(),
+                    )
+                    .animateContentSize(animationSpec = tween(AmaduseMotion.Default))
+                    .padding(start = 12.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                BasicTextField(
-                    value = draft,
-                    onValueChange = onDraftChange,
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester),
-                    textStyle = TextStyle(
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 16.sp,
-                        lineHeight = 21.sp,
-                    ),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.Sentences,
-                        imeAction = ImeAction.Send,
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onSend = {
-                            if (canSend) {
-                                onSend()
-                                focusManager.clearFocus()
-                                keyboardController?.hide()
+                        .weight(1f)
+                        .heightIn(min = 40.dp, max = 136.dp)
+                        .padding(vertical = 5.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    BasicTextField(
+                        value = draft,
+                        onValueChange = onDraftChange,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(focusRequester),
+                        textStyle = TextStyle(
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 16.sp,
+                            lineHeight = 21.sp,
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
+                        keyboardOptions = KeyboardOptions(
+                            capitalization = KeyboardCapitalization.Sentences,
+                            imeAction = ImeAction.Send,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onSend = {
+                                if (canSend) {
+                                    onSend()
+                                    focusManager.clearFocus()
+                                    keyboardController?.hide()
+                                }
+                            },
+                        ),
+                        minLines = 1,
+                        maxLines = 6,
+                        interactionSource = remember { MutableInteractionSource() },
+                        decorationBox = { innerTextField ->
+                            if (draft.isBlank()) {
+                                Text(
+                                    text = when {
+                                        sending -> "Amaduse 正在输出..."
+                                        recording -> "正在听..."
+                                        else -> "Message Amaduse"
+                                    },
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 16.sp,
+                                )
                             }
-                        },
-                    ),
-                    minLines = 1,
-                    maxLines = 6,
-                    interactionSource = remember { MutableInteractionSource() },
-                    decorationBox = { innerTextField ->
-                        if (draft.isBlank()) {
-                            Text(
-                                text = when {
-                                    sending -> "Amaduse 正在输出..."
-                                    recording -> "正在听..."
-                                    else -> "Message Amaduse"
-                                },
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 16.sp,
-                            )
-                        }
-                        innerTextField()
-                    },
-                )
-            }
-            AnimatedContent(
-                targetState = when {
-                    sending -> "streaming"
-                    canSend -> "send"
-                    else -> "voice"
-                },
-                transitionSpec = {
-                    fadeIn(tween(AmaduseMotion.Fast)) + scaleIn(initialScale = 0.84f) togetherWith
-                        fadeOut(tween(AmaduseMotion.Fast)) + scaleOut(targetScale = 0.84f)
-                },
-                label = "composer-action",
-            ) { state ->
-                if (state == "send") {
-                    IconButton(
-                        onClick = {
-                            onSend()
-                            keyboardController?.hide()
-                            focusManager.clearFocus()
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary,
-                        ),
-                        modifier = Modifier.size(40.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ArrowUpward,
-                            contentDescription = "发送",
-                        )
-                    }
-                } else if (state == "streaming") {
-                    IconButton(
-                        onClick = {},
-                        enabled = false,
-                        colors = IconButtonDefaults.iconButtonColors(
-                            disabledContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
-                            disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.46f),
-                        ),
-                        modifier = Modifier.size(40.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.MoreHoriz,
-                            contentDescription = "输出中",
-                        )
-                    }
-                } else {
-                    ComposerIconButton(
-                        icon = Icons.Rounded.Mic,
-                        contentDescription = "语音输入",
-                        active = recording,
-                        onClick = {
-                            onVoiceToggle()
-                            keyboardController?.hide()
-                            focusManager.clearFocus()
+                            innerTextField()
                         },
                     )
+                }
+                AnimatedContent(
+                    targetState = when {
+                        sending -> "streaming"
+                        canSend -> "send"
+                        else -> "voice"
+                    },
+                    transitionSpec = {
+                        fadeIn(tween(AmaduseMotion.Fast)) + scaleIn(initialScale = 0.84f) togetherWith
+                            fadeOut(tween(AmaduseMotion.Fast)) + scaleOut(targetScale = 0.84f)
+                    },
+                    label = "composer-action",
+                ) { state ->
+                    if (state == "send") {
+                        IconButton(
+                            onClick = {
+                                onSend()
+                                keyboardController?.hide()
+                                focusManager.clearFocus()
+                            },
+                            colors = IconButtonDefaults.iconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                            ),
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ArrowUpward,
+                                contentDescription = "发送",
+                            )
+                        }
+                    } else if (state == "streaming") {
+                        IconButton(
+                            onClick = {},
+                            enabled = false,
+                            colors = IconButtonDefaults.iconButtonColors(
+                                disabledContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
+                                disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.46f),
+                            ),
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.MoreHoriz,
+                                contentDescription = "输出中",
+                            )
+                        }
+                    } else {
+                        ComposerIconButton(
+                            icon = Icons.Rounded.Mic,
+                            contentDescription = "语音输入",
+                            active = recording,
+                            onClick = {
+                                onVoiceToggle()
+                                keyboardController?.hide()
+                                focusManager.clearFocus()
+                            },
+                        )
+                    }
                 }
             }
         }
