@@ -35,6 +35,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -91,8 +93,6 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -120,6 +120,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -150,6 +152,7 @@ import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
@@ -1081,6 +1084,7 @@ private fun TopModelSelector(
     onModelConfigure: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val dark = isSystemInDarkTheme()
     val availableModels = configuredModels.filter { it.apiKey.isNotBlank() }
     val currentConfigured = configuredModels.firstOrNull { it.id == settings.configuredModelId }
     val modelLabel = currentConfigured?.displayName
@@ -1088,14 +1092,19 @@ private fun TopModelSelector(
         ?: "未配置"
 
     Box {
+        // Trigger button — glass pill
         Surface(
             modifier = Modifier
                 .width(88.dp)
-                .height(38.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f),
+                .height(38.dp)
+                .glassLayer(
+                    shape = RoundedCornerShape(999.dp),
+                    dark = dark,
+                ),
+            color = Color.Transparent,
             contentColor = MaterialTheme.colorScheme.onSurface,
             shape = RoundedCornerShape(999.dp),
-            onClick = { expanded = true },
+            onClick = { expanded = !expanded },
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 9.dp),
@@ -1114,91 +1123,201 @@ private fun TopModelSelector(
                 Icon(
                     imageVector = Icons.Rounded.KeyboardArrowDown,
                     contentDescription = null,
-                    modifier = Modifier.size(15.dp),
+                    modifier = Modifier
+                        .size(15.dp)
+                        .graphicsLayer {
+                            rotationZ = if (expanded) 180f else 0f
+                        },
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
-        DropdownMenu(
-            expanded = expanded,
+
+        // Glass dropdown — focusable=false keeps trigger clickable;
+        // transparent fullscreen tap-layer inside Popup handles outside dismiss.
+        val borderColor = if (dark) Color.White.copy(alpha = 0.10f)
+                          else Color.Black.copy(alpha = 0.06f)
+        val highlight = if (dark) Color.White.copy(alpha = 0.08f)
+                        else Color.White.copy(alpha = 0.35f)
+        val hoverColor = if (dark) Color.White.copy(alpha = 0.06f)
+                         else Color.Black.copy(alpha = 0.04f)
+        val glassBg = if (dark) Color(0x991C1C1E) else Color(0x99F2F2F7)
+
+        // Popup only exists while open — avoids permanent fullscreen overlay blocking all touches.
+        // Entrance animation plays on appear; exit is instant (Popup removed from tree).
+        if (expanded) Popup(
+            alignment = Alignment.TopStart,
             onDismissRequest = { expanded = false },
+            properties = PopupProperties(focusable = false),
         ) {
-            if (availableModels.isEmpty()) {
-                DropdownMenuItem(
-                    text = {
-                        Column {
-                            Text(
-                                text = "暂无可用模型",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
+            // Fullscreen transparent tap-layer for outside-click dismiss
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { expanded = false },
+            ) {
+                Column(
+                        modifier = Modifier
+                            .padding(top = 46.dp, start = 8.dp)
+                            .widthIn(min = 220.dp, max = 280.dp)
+                            .heightIn(max = 360.dp)
+                            .graphicsLayer {
+                                shadowElevation = 20f
+                                shape = RoundedCornerShape(AmaduseStyle.PanelRadius)
+                                clip = true
+                            }
+                            .background(glassBg, RoundedCornerShape(AmaduseStyle.PanelRadius))
+                            .border(
+                                BorderStroke(AmaduseStyle.Hairline, borderColor),
+                                RoundedCornerShape(AmaduseStyle.PanelRadius),
                             )
-                            Text(
-                                text = "请先添加 API Key",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { /* consume tap — don't dismiss when tapping inside dropdown */ },
+                    ) {
+                        // Top glass highlight band
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(AmaduseStyle.Hairline)
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color.Transparent, highlight, Color.Transparent),
+                                    ),
+                                ),
+                        )
+
+                        if (availableModels.isEmpty()) {
+                            GlassModalItem(
+                                title = "暂无可用模型",
+                                subtitle = "请先添加 API Key",
+                                dark = dark,
+                                hoverColor = hoverColor,
+                                onClick = {
+                                    expanded = false
+                                    onModelConfigure()
+                                },
                             )
                         }
-                    },
-                    onClick = {
-                        expanded = false
-                        onModelConfigure()
-                    },
-                )
-            }
-            availableModels.forEach { configured ->
-                    DropdownMenuItem(
-                        text = {
-                            Column {
-                                Text(
-                                    text = configured.displayName,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Text(
-                                    text = configured.model,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
+
+                        availableModels.forEachIndexed { index, configured ->
+                            if (index > 0) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp)
+                                        .height(AmaduseStyle.Hairline)
+                                        .background(borderColor),
                                 )
                             }
-                        },
-                        onClick = {
-                            expanded = false
-                            onModelSelect(configured)
-                        },
-                    )
-            }
-            DropdownMenuItem(
-                text = {
-                    Column {
-                        Text(
-                            text = "自定义",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            text = "跳转到模型配置",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            GlassModalItem(
+                                title = configured.displayName,
+                                subtitle = configured.model,
+                                dark = dark,
+                                hoverColor = hoverColor,
+                                selected = configured.id == settings.configuredModelId,
+                                onClick = {
+                                    expanded = false
+                                    onModelSelect(configured)
+                                },
+                            )
+                        }
+
+                        if (availableModels.isNotEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp)
+                                    .height(AmaduseStyle.Hairline)
+                                    .background(borderColor),
+                            )
+                        }
+
+                        GlassModalItem(
+                            title = "自定义",
+                            subtitle = "跳转到模型配置",
+                            dark = dark,
+                            hoverColor = hoverColor,
+                            trailing = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Settings,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            },
+                            onClick = {
+                                expanded = false
+                                onModelConfigure()
+                            },
                         )
                     }
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Rounded.Settings,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                    )
-                },
-                onClick = {
-                    expanded = false
-                    onModelConfigure()
-                },
+            }
+        }
+    }
+}
+
+@Composable
+private fun GlassModalItem(
+    title: String,
+    subtitle: String,
+    dark: Boolean,
+    hoverColor: Color,
+    selected: Boolean = false,
+    trailing: @Composable (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
+    var pressed by remember { mutableStateOf(false) }
+    val itemBg by animateColorAsState(
+        targetValue = if (pressed) hoverColor else Color.Transparent,
+        animationSpec = tween(AmaduseMotion.Fast),
+        label = "glass-item-bg",
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+            ) {
+                pressed = true
+                onClick()
+            }
+            .background(itemBg)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
+        if (selected) {
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+        }
+        trailing?.invoke()
     }
 }
 
@@ -3740,7 +3859,9 @@ private fun createNewChatRecord(): ChatRecord {
 }
 
 private fun currentTimeText(): String {
-    return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+    return SimpleDateFormat("HH:mm", Locale.getDefault()).apply {
+        timeZone = TimeZone.getTimeZone("Asia/Shanghai")
+    }.format(Date())
 }
 
 private fun chatRecordsFile(context: Context): File {
