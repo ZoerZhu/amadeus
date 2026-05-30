@@ -25,12 +25,19 @@ internal object ChatCompletionModeAdapter {
         config: ChatCompletionModeConfig,
         mode: ChatCompletionMode,
         payloadMessages: JSONArray,
+        tools: JSONArray? = null,
+        stream: Boolean = true,
     ): JSONObject {
         val requestModel = resolveRequestModel(config, mode)
         val payload = JSONObject()
             .put("model", requestModel)
-            .put("stream", true)
+            .put("stream", stream)
             .put("messages", payloadMessages)
+
+        if (tools != null && tools.length() > 0) {
+            payload.put("tools", tools)
+            payload.put("tool_choice", "auto")
+        }
 
         applyModeParameters(payload, config, mode, requestModel)
         return payload

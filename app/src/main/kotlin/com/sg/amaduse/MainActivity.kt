@@ -1,8 +1,10 @@
 package com.sg.amaduse
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -28,6 +30,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -107,6 +110,7 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -127,6 +131,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -135,6 +140,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.window.Popup
@@ -155,6 +161,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.Canvas
 import com.sg.amaduse.agent.audio.AssistantSpeechConfig
 import com.sg.amaduse.agent.audio.DEFAULT_VOICE_REFERENCE_SOURCE
 import com.sg.amaduse.agent.audio.SpeechOutputCoordinator
@@ -170,11 +177,18 @@ import com.sg.amaduse.agent.persona.PersonaPromptBuilder
 import com.sg.amaduse.agent.persona.PromptMode
 import com.sg.amaduse.agent.persona.PromptRuntimeContext
 import com.sg.amaduse.agent.persona.personaPresets
+import com.sg.amaduse.agent.tools.AddMemoTool
+import com.sg.amaduse.agent.tools.AgentToolContext
+import com.sg.amaduse.agent.tools.SetAlarmTool
+import com.sg.amaduse.agent.tools.TestEmotionTool
+import com.sg.amaduse.agent.tools.TestVoiceTool
+import com.sg.amaduse.agent.tools.ToolRegistry
 import com.sg.amaduse.ui.theme.AmaduseMotion
 import com.sg.amaduse.ui.theme.AmaduseStyle
 import com.sg.amaduse.ui.theme.AmaduseTheme
 import com.sg.amaduse.ui.theme.glassLayer
 import com.sg.amaduse.ui.theme.iconGlass
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -258,6 +272,37 @@ private fun AmaduseApp() {
             )
         }
     }
+    val pendingCalendarPermission = remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
+    val calendarPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        val granted = grants[Manifest.permission.READ_CALENDAR] == true &&
+            grants[Manifest.permission.WRITE_CALENDAR] == true
+        pendingCalendarPermission.value?.complete(granted)
+        pendingCalendarPermission.value = null
+    }
+    val requestCalendarPermissions: suspend () -> Boolean = {
+        val alreadyGranted = context.checkSelfPermission(Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED &&
+            context.checkSelfPermission(Manifest.permission.WRITE_CALENDAR) == PackageManager.PERMISSION_GRANTED
+        if (alreadyGranted) {
+            true
+        } else {
+            withContext(Dispatchers.Main) {
+                pendingCalendarPermission.value?.let { existing ->
+                    return@withContext existing.await()
+                }
+                val request = CompletableDeferred<Boolean>()
+                pendingCalendarPermission.value = request
+                calendarPermissionLauncher.launch(
+                    arrayOf(
+                        Manifest.permission.READ_CALENDAR,
+                        Manifest.permission.WRITE_CALENDAR,
+                    ),
+                )
+                request.await()
+            }
+        }
+    }
     val sending = messages.any { it.streaming }
 
     val live2dWebView = remember(context) {
@@ -286,6 +331,24 @@ private fun AmaduseApp() {
             settings.cacheMode = WebSettings.LOAD_DEFAULT
             loadUrl("file:///android_asset/live2d_viewer.html")
         }
+    }
+
+    // Register agent tools once
+    val agentToolContext = remember(context, voiceSettings, modelSettings, live2dWebView) {
+        val ctx = AgentToolContext(
+            appContext = context,
+            voiceSettings = voiceSettings,
+            modelSettings = modelSettings,
+            live2dWebView = live2dWebView,
+            requestCalendarPermissions = requestCalendarPermissions,
+        )
+        if (ToolRegistry.all().isEmpty()) {
+            ToolRegistry.register(TestVoiceTool())
+            ToolRegistry.register(TestEmotionTool())
+            ToolRegistry.register(SetAlarmTool())
+            ToolRegistry.register(AddMemoTool())
+        }
+        ctx
     }
 
     Surface(
@@ -390,7 +453,7 @@ private fun AmaduseApp() {
                                     draft = when (shortcut.title) {
                                         "相机" -> "帮我看一下摄像头里的内容"
                                         "闹钟" -> "帮我设置一个闹钟"
-                                        "备忘" -> "帮我记录一个备忘"
+                                        "备忘" -> "帮我创建一个日历任务"
                                         "电脑" -> "帮我把这个任务发送到电脑"
                                         else -> draft
                                     }
@@ -446,6 +509,8 @@ private fun AmaduseApp() {
                                         mode = selectedMode,
                                         settings = modelSettings,
                                         voiceSettings = voiceSettings,
+                                        live2dWebView = live2dWebView,
+                                        agentToolContext = agentToolContext,
                                     )
                                 }
                             }
@@ -576,11 +641,11 @@ private fun ChatScreen(
     ) {
         ChatTopBar(
             persona = selectedPersona,
+            live2dWebView = live2dWebView,
             settings = settings,
             configuredModels = configuredModels,
             mode = selectedMode,
             sending = sending,
-            onPersonaClick = onPersonaClick,
             onSettingsClick = onHistoryOpen,
             onNewChat = onNewChat,
             onModeChange = onModeChange,
@@ -914,11 +979,11 @@ private fun HistoryRecordRow(
 @Composable
 private fun ChatTopBar(
     persona: PersonaPreset,
+    live2dWebView: WebView,
     settings: ModelSettings,
     configuredModels: List<ConfiguredModel>,
     mode: ChatMode,
     sending: Boolean,
-    onPersonaClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onNewChat: () -> Unit,
     onModeChange: (ChatMode) -> Unit,
@@ -952,37 +1017,13 @@ private fun ChatTopBar(
             onModelSelect = onModelSelect,
             onModelConfigure = onModelConfigure,
         )
-        Surface(
+        EmotionPickerChip(
+            personaName = persona.name,
+            live2dWebView = live2dWebView,
             modifier = Modifier
                 .weight(1f)
                 .height(38.dp),
-            color = Color.Transparent,
-            shape = RoundedCornerShape(999.dp),
-            onClick = onPersonaClick,
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 8.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = persona.name,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Icon(
-                    imageVector = Icons.Rounded.KeyboardArrowDown,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-        }
+        )
         TopModeSwitch(
             mode = mode,
             onModeChange = onModeChange,
@@ -999,6 +1040,128 @@ private fun ChatTopBar(
                 tint = MaterialTheme.colorScheme.onBackground,
             )
         }
+    }
+}
+
+@Composable
+private fun EmotionPickerChip(
+    personaName: String,
+    live2dWebView: WebView,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val dark = isSystemInDarkTheme()
+    val panelColor = if (dark) Color(0xEE1C1C1E) else Color(0xEEF7F7F8)
+    val itemHover = if (dark) Color.White.copy(alpha = 0.07f) else Color.Black.copy(alpha = 0.045f)
+    val emotions = listOf(
+        "neutral" to "自然",
+        "joy" to "开心",
+        "smile" to "微笑",
+        "shy" to "害羞",
+        "surprise" to "惊讶",
+        "anger" to "生气",
+        "sadness" to "难过",
+        "unhappy" to "不满",
+    )
+
+    Box(modifier = modifier) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color.Transparent,
+            shape = RoundedCornerShape(999.dp),
+            onClick = { expanded = !expanded },
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = personaName,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Icon(
+                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .graphicsLayer {
+                            rotationZ = if (expanded) 180f else 0f
+                        },
+                )
+            }
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = panelColor,
+            shape = RoundedCornerShape(AmaduseStyle.PanelRadius),
+            shadowElevation = 16.dp,
+        ) {
+            emotions.forEach { (emotion, label) ->
+                EmotionMenuItem(
+                    label = label,
+                    value = emotion,
+                    hoverColor = itemHover,
+                    onClick = {
+                        live2dWebView.evaluateJavascript("playEmotion('$emotion')", null)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmotionMenuItem(
+    label: String,
+    value: String,
+    hoverColor: Color,
+    onClick: () -> Unit,
+) {
+    var pressed by remember { mutableStateOf(false) }
+    val background by animateColorAsState(
+        targetValue = if (pressed) hoverColor else Color.Transparent,
+        animationSpec = tween(AmaduseMotion.Fast),
+        label = "emotion-menu-item-bg",
+    )
+    Row(
+        modifier = Modifier
+            .width(148.dp)
+            .background(background)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+            ) {
+                pressed = true
+                onClick()
+            }
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        StatusDot(active = false)
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = value,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.labelSmall,
+        )
     }
 }
 
@@ -2105,6 +2268,9 @@ private fun AgentMessage(
                 streaming = message.streaming,
                 onToggle = onToggleThinking,
             )
+            message.activeToolName?.let { toolName ->
+                ToolCallLoadingLine(toolName = toolName)
+            }
             if (message.text.isNotBlank()) {
                 Text(
                     text = message.text,
@@ -2122,6 +2288,56 @@ private fun AgentMessage(
                 AttachmentRow(attachments = message.attachments)
             }
         }
+    }
+}
+
+@Composable
+private fun ToolCallLoadingLine(toolName: String) {
+    val transition = rememberInfiniteTransition(label = "tool-call-loading")
+    val rotation by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(animation = tween(900, easing = LinearEasing)),
+        label = "tool-call-spinner",
+    )
+    val textAlpha by transition.animateFloat(
+        initialValue = 0.42f,
+        targetValue = 0.92f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(820, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "tool-call-text-alpha",
+    )
+    val spinnerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.48f)
+
+    Row(
+        modifier = Modifier.padding(top = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Canvas(
+            modifier = Modifier
+                .size(15.dp)
+                .rotate(rotation),
+        ) {
+            drawArc(
+                color = spinnerColor,
+                startAngle = 25f,
+                sweepAngle = 285f,
+                useCenter = false,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = 2.dp.toPx(),
+                    cap = StrokeCap.Round,
+                ),
+            )
+        }
+        Text(
+            text = "正在调用 $toolName ...",
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = textAlpha),
+            style = MaterialTheme.typography.bodyMedium,
+            lineHeight = 20.sp,
+        )
     }
 }
 

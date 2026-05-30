@@ -199,6 +199,13 @@
       }
       requestAnimationFrame(renderLoop);
 
+      window.playEmotion = function(emotion) {
+        try {
+          model.motion(emotion, 0, PIXI.live2d.MotionPriority.NORMAL);
+          model.expression(emotion);
+        } catch (_) {}
+      };
+
       setInterval(() => {
         const group = RANDOM_MOTIONS[Math.floor(Math.random() * RANDOM_MOTIONS.length)];
         try {

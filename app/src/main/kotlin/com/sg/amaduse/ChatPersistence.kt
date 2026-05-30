@@ -260,6 +260,7 @@ private fun messageToJson(message: ChatMessage): JSONObject {
         .put("show_thinking", message.showThinking)
         .put("thinking_expanded", message.thinkingExpanded)
         .put("streaming", false)
+        .put("active_tool_name", JSONObject.NULL)
         .put("mode", message.mode.name)
         .put("attachments", attachments)
 }
@@ -286,6 +287,7 @@ private fun jsonToMessage(json: JSONObject): ChatMessage {
         showThinking = json.optBoolean("show_thinking", false),
         thinkingExpanded = json.optBoolean("thinking_expanded", false),
         streaming = false,
+        activeToolName = null,
         mode = runCatching {
             ChatMode.valueOf(json.optString("mode"))
         }.getOrDefault(ChatMode.Fast),

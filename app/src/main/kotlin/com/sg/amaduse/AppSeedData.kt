@@ -100,7 +100,7 @@ internal val toolShortcuts = listOf(
     ToolShortcut("图片", "上传视觉上下文", Icons.Rounded.Image),
     ToolShortcut("文件", "附加资料", Icons.Rounded.AttachFile),
     ToolShortcut("闹钟", "创建提醒", Icons.Rounded.Alarm),
-    ToolShortcut("备忘", "记录想法", Icons.Rounded.Description),
+    ToolShortcut("备忘", "创建日历任务", Icons.Rounded.Description),
     ToolShortcut("电脑", "发送 PC 任务", Icons.Rounded.Computer),
 )
 

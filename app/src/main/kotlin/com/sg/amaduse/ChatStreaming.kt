@@ -1,7 +1,11 @@
 package com.sg.amaduse
 
 import android.content.Context
+import android.webkit.WebView
+import com.sg.amaduse.agent.AgentMessage
 import com.sg.amaduse.agent.audio.AssistantSpeechConfig
+import com.sg.amaduse.agent.runAgentLoop
+import com.sg.amaduse.agent.tools.AgentToolContext
 import com.sg.amaduse.agent.audio.SpeechOutputCoordinator
 import com.sg.amaduse.agent.audio.SpeechTranslationConfig
 import com.sg.amaduse.agent.audio.VoiceSettings
@@ -34,6 +38,8 @@ internal suspend fun streamAssistantMessage(
     mode: ChatMode,
     settings: ModelSettings,
     voiceSettings: VoiceSettings,
+    live2dWebView: WebView? = null,
+    agentToolContext: AgentToolContext? = null,
 ) {
     fun update(transform: (ChatMessage) -> ChatMessage) {
         if (assistantIndex in messages.indices) {
@@ -52,26 +58,99 @@ internal suspend fun streamAssistantMessage(
         ),
     )
 
-    val error = fetchOpenAiCompatibleLiveStream(
+    val emotionRegex = Regex("\\[emotion:(\\w+)]")
+    val validEmotions = setOf("neutral", "anger", "joy", "sadness", "shy", "smile", "surprise", "unhappy")
+    var emotionFired = false
+    var rawBuffer = ""
+    var displayedBuffer = ""
+
+    suspend fun handleContentChunk(chunk: String) {
+        rawBuffer += chunk
+        if (!emotionFired) {
+            val match = emotionRegex.find(rawBuffer)
+            if (match != null) {
+                val emotion = match.groupValues[1]
+                if (emotion in validEmotions) {
+                    live2dWebView?.evaluateJavascript("playEmotion('$emotion')", null)
+                }
+                emotionFired = true
+            }
+        }
+
+        val nextDisplayText = rawBuffer.stripEmotionTagsForDisplay(emotionRegex)
+        val cleanChunk = nextDisplayText.removePrefix(displayedBuffer)
+        displayedBuffer = nextDisplayText
+        if (cleanChunk.isBlank()) {
+            update { it.copy(text = nextDisplayText) }
+            return
+        }
+
+        speechOutput?.onContent(cleanChunk) { _ ->
+            update { it.copy(text = nextDisplayText, activeToolName = null) }
+        } ?: update { it.copy(text = nextDisplayText, activeToolName = null) }
+    }
+
+    val toolCtx = agentToolContext
+    val useAgentLoop = toolCtx != null && shouldUseAgentLoopForInput(
         settings = settings,
-        persona = persona,
-        mode = mode,
         history = requestHistory,
-        onThinking = { chunk ->
-            update { message ->
-                message.copy(
-                    thinking = message.thinking + chunk,
-                    showThinking = true,
-                    thinkingExpanded = message.thinking.isBlank() || message.thinkingExpanded,
+        userText = userText,
+    )
+    val error = if (toolCtx != null && useAgentLoop) {
+        // Agent mode: use agent loop with tool support
+        val agentHistory = requestHistory
+            .filter { it.text.isNotBlank() }
+            .takeLast(12)
+            .map { message ->
+                AgentMessage(
+                    role = if (message.isAgent) "assistant" else "user",
+                    content = message.text,
                 )
             }
-        },
-        onContent = { chunk ->
-            speechOutput?.onContent(chunk) { textChunk ->
-                update { it.copy(text = it.text + textChunk) }
-            } ?: update { it.copy(text = it.text + chunk) }
-        },
-    )
+
+        runAgentLoop(
+            settings = settings,
+            mode = mode,
+            persona = persona,
+            history = agentHistory,
+            toolContext = toolCtx,
+            onContent = { chunk ->
+                handleContentChunk(chunk)
+            },
+            onThinking = { chunk ->
+                update { message ->
+                    message.copy(
+                        thinking = message.thinking + chunk,
+                        showThinking = true,
+                        thinkingExpanded = message.thinking.isBlank() || message.thinkingExpanded,
+                    )
+                }
+            },
+            onToolCall = { toolName, _ ->
+                update { it.copy(activeToolName = toolName) }
+            },
+        )
+    } else {
+        // Regular streaming mode (no tools)
+        fetchOpenAiCompatibleLiveStream(
+            settings = settings,
+            persona = persona,
+            mode = mode,
+            history = requestHistory,
+            onThinking = { chunk ->
+                update { message ->
+                    message.copy(
+                        thinking = message.thinking + chunk,
+                        showThinking = true,
+                        thinkingExpanded = message.thinking.isBlank() || message.thinkingExpanded,
+                    )
+                }
+            },
+            onContent = { chunk ->
+                handleContentChunk(chunk)
+            },
+        )
+    }
 
     if (error != null) {
         splitForStreaming("请求失败：$error").forEach { chunk ->
@@ -91,11 +170,155 @@ internal suspend fun streamAssistantMessage(
     update { message ->
         message.copy(
             streaming = false,
+            activeToolName = null,
             thinkingExpanded = false,
             showThinking = message.thinking.isNotBlank(),
         )
     }
     saveChatMessages(context, recordId, messages)
+}
+
+private suspend fun shouldUseAgentLoopForInput(
+    settings: ModelSettings,
+    history: List<ChatMessage>,
+    userText: String,
+): Boolean = withContext(Dispatchers.IO) {
+    if (!settings.useRemote || !settings.provider.compatible) {
+        return@withContext looksLikeLocalToolRequest(userText)
+    }
+    if (settings.apiKey.isBlank() && !settings.provider.name.equals("Ollama", ignoreCase = true)) {
+        return@withContext looksLikeLocalToolRequest(userText)
+    }
+
+    val base = settings.baseUrl.trim().trimEnd('/')
+    val endpoint = "$base/chat/completions"
+    val recentContext = history
+        .dropLast(1)
+        .filter { it.text.isNotBlank() }
+        .takeLast(4)
+        .joinToString("\n") { message ->
+            "${if (message.isAgent) "assistant" else "user"}: ${message.text.take(300)}"
+        }
+        .ifBlank { "无" }
+
+    val classifierPrompt = """
+        你是 Amaduse 移动端 Agent 路由器，只判断当前用户输入是否需要调用本地工具。
+        可用工具：
+        - test_voice：测试语音合成/播放；用户问“你能说话吗”“能出声吗”“语音正常吗”也算需要。
+        - test_emotion：测试 Live2D 表情或动作。
+        - set_alarm：按北京时间直接创建 Android 系统闹钟；“30 分钟后/2 小时后”这类相对提醒也算需要。
+        - add_memo：在 Android 官方 Calendar 中创建日历任务/事项；缺少标题、开始时间、结束时间时也需要进入 agent，由 agent 继续追问。
+        只有用户明确要求执行这些本地操作，或当前输入是在补充这些操作所需参数时，use_agent 才为 true。
+        普通聊天、知识问答、角色扮演、闲聊、代码解释、设置咨询，一律 false。
+        只输出严格 JSON，不要解释：{"use_agent":true} 或 {"use_agent":false}
+    """.trimIndent()
+
+    val payloadMessages = JSONArray()
+        .put(JSONObject().put("role", "system").put("content", classifierPrompt))
+        .put(
+            JSONObject()
+                .put("role", "user")
+                .put(
+                    "content",
+                    "最近上下文：\n$recentContext\n\n当前输入：\n$userText",
+                ),
+        )
+
+    val payload = ChatCompletionModeAdapter.buildPayload(
+        config = settings.toChatCompletionModeConfig(),
+        mode = ChatCompletionMode.Fast,
+        payloadMessages = payloadMessages,
+        stream = false,
+    )
+
+    val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 10_000
+        readTimeout = 20_000
+        doOutput = true
+        setRequestProperty("Content-Type", "application/json")
+        setRequestProperty("Accept", "application/json")
+        if (settings.apiKey.isNotBlank()) {
+            setRequestProperty("Authorization", "Bearer ${settings.apiKey}")
+        }
+    }
+
+    try {
+        connection.outputStream.use { output ->
+            output.write(payload.toString().toByteArray(Charsets.UTF_8))
+        }
+        val responseCode = connection.responseCode
+        if (responseCode !in 200..299) {
+            return@withContext looksLikeLocalToolRequest(userText)
+        }
+
+        val body = connection.inputStream.bufferedReader().use { it.readText() }
+        val content = JSONObject(body)
+            .optJSONArray("choices")
+            ?.optJSONObject(0)
+            ?.optJSONObject("message")
+            ?.optString("content")
+            .orEmpty()
+        parseAgentRouteDecision(content) ?: looksLikeLocalToolRequest(userText)
+    } catch (_: Exception) {
+        looksLikeLocalToolRequest(userText)
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun parseAgentRouteDecision(content: String): Boolean? {
+    val start = content.indexOf('{')
+    val end = content.lastIndexOf('}')
+    if (start >= 0 && end > start) {
+        val json = runCatching { JSONObject(content.substring(start, end + 1)) }.getOrNull()
+        if (json != null && json.has("use_agent")) {
+            return json.optBoolean("use_agent", false)
+        }
+    }
+    val normalized = content.lowercase(Locale.ROOT)
+    return when {
+        "\"use_agent\":true" in normalized || "use_agent:true" in normalized -> true
+        "\"use_agent\":false" in normalized || "use_agent:false" in normalized -> false
+        else -> null
+    }
+}
+
+private fun looksLikeLocalToolRequest(text: String): Boolean {
+    val normalized = text.lowercase(Locale.ROOT)
+    return listOf(
+        "闹钟",
+        "提醒我",
+        "叫醒我",
+        "备忘",
+        "记一下",
+        "记下来",
+        "记录一下",
+        "你能说话",
+        "能说话",
+        "出声",
+        "语音测试",
+        "测试语音",
+        "表情",
+        "live2d",
+        "emotion",
+    ).any { it in normalized }
+}
+
+private fun String.stripEmotionTagsForDisplay(emotionRegex: Regex): String {
+    val withoutCompleteTags = replace(emotionRegex, "")
+    val markerStart = withoutCompleteTags.lastIndexOf('[')
+    if (markerStart < 0 || markerStart != withoutCompleteTags.length - 1 && '\n' in withoutCompleteTags.substring(markerStart)) {
+        return withoutCompleteTags
+    }
+    val trailing = withoutCompleteTags.substring(markerStart + 1).lowercase(Locale.ROOT)
+    val fullMarkerPrefix = "emotion:"
+    val isPotentialEmotionMarker = fullMarkerPrefix.startsWith(trailing) || trailing.startsWith(fullMarkerPrefix)
+    return if (isPotentialEmotionMarker) {
+        withoutCompleteTags.substring(0, markerStart)
+    } else {
+        withoutCompleteTags
+    }
 }
 
 private suspend fun fetchOpenAiCompatibleLiveStream(
@@ -249,7 +472,8 @@ private fun ModelSettings.toSpeechTranslationConfig(): SpeechTranslationConfig {
 }
 
 private fun currentPromptTimeText(): String {
-    return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).apply {
+    val time = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).apply {
         timeZone = TimeZone.getTimeZone("Asia/Shanghai")
     }.format(Date())
+    return "北京时间 $time"
 }

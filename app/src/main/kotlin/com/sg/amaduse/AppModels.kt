@@ -16,6 +16,7 @@ internal data class ChatMessage(
     val showThinking: Boolean = false,
     val thinkingExpanded: Boolean = false,
     val streaming: Boolean = false,
+    val activeToolName: String? = null,
     val mode: ChatMode = ChatMode.Fast,
 )
 
