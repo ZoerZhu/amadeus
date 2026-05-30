@@ -148,6 +148,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
@@ -423,6 +424,8 @@ private fun AmaduseApp() {
     var personaSheetVisible by remember { mutableStateOf(false) }
     var settingsVisible by remember { mutableStateOf(false) }
     var settingsSheetMode by remember { mutableStateOf(SettingsSheetMode.Full) }
+    var newChatConfirmVisible by remember { mutableStateOf(false) }
+    var deleteConfirmRecord by remember { mutableStateOf<ChatRecord?>(null) }
     var toolsVisible by remember { mutableStateOf(false) }
     var characterExpanded by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
@@ -453,6 +456,34 @@ private fun AmaduseApp() {
     }
     val sending = messages.any { it.streaming }
 
+    val live2dWebView = remember(context) {
+        WebView(context).apply {
+            setBackgroundColor(android.graphics.Color.rgb(240, 245, 246))
+            isVerticalScrollBarEnabled = false
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                    Log.d(
+                        "AmaduseLive2D",
+                        "${consoleMessage.message()} (${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})",
+                    )
+                    return true
+                }
+            }
+            webViewClient = WebViewClient()
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.allowFileAccess = true
+            settings.allowContentAccess = true
+            settings.allowFileAccessFromFileURLs = true
+            settings.allowUniversalAccessFromFileURLs = true
+            settings.mediaPlaybackRequiresUserGesture = false
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            loadUrl("file:///android_asset/live2d_viewer.html")
+        }
+    }
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
@@ -477,18 +508,13 @@ private fun AmaduseApp() {
                         records = records,
                         selectedRecord = selectedRecord,
                         onAvatarClick = {
+                            android.util.Log.d("Amaduse", "Avatar clicked! settingsVisible=$settingsVisible")
                             settingsSheetMode = SettingsSheetMode.Full
                             settingsVisible = true
+                            android.util.Log.d("Amaduse", "After set: settingsVisible=$settingsVisible")
                         },
                         onNewChat = {
-                            val newRecord = createNewChatRecord()
-                            records.add(0, newRecord)
-                            selectedRecord = newRecord
-                            messages.clear()
-                            saveChatRecords(context, records)
-                            saveChatMessages(context, newRecord.id, messages)
-                            characterExpanded = false
-                            appScreen = AppScreen.Chat
+                            newChatConfirmVisible = true
                         },
                         onRecordClick = { record ->
                             selectedRecord = record
@@ -496,10 +522,14 @@ private fun AmaduseApp() {
                             messages += loadChatMessages(context, record.id)
                             appScreen = AppScreen.Chat
                         },
+                        onDeleteRecord = { record ->
+                            deleteConfirmRecord = record
+                        },
                         onDismiss = { appScreen = AppScreen.Chat },
                     )
                 } else {
                     ChatScreen(
+                        live2dWebView = live2dWebView,
                         selectedPersona = selectedPersona,
                         settings = modelSettings,
                         configuredModels = configuredModels,
@@ -514,13 +544,7 @@ private fun AmaduseApp() {
                         onHistoryOpen = { appScreen = AppScreen.History },
                         onPersonaClick = { personaSheetVisible = true },
                         onNewChat = {
-                            val newRecord = createNewChatRecord()
-                            records.add(0, newRecord)
-                            selectedRecord = newRecord
-                            messages.clear()
-                            saveChatRecords(context, records)
-                            saveChatMessages(context, newRecord.id, messages)
-                            characterExpanded = false
+                            newChatConfirmVisible = true
                         },
                         onModeChange = {
                             selectedMode = it
@@ -657,12 +681,47 @@ private fun AmaduseApp() {
                 },
                 onDismiss = { personaSheetVisible = false },
             )
+
+            NewChatConfirmSheet(
+                visible = newChatConfirmVisible,
+                onConfirm = {
+                    val newRecord = createNewChatRecord()
+                    records.add(0, newRecord)
+                    selectedRecord = newRecord
+                    messages.clear()
+                    saveChatRecords(context, records)
+                    saveChatMessages(context, newRecord.id, messages)
+                    characterExpanded = false
+                    appScreen = AppScreen.Chat
+                    newChatConfirmVisible = false
+                },
+                onDismiss = { newChatConfirmVisible = false },
+            )
+
+            DeleteConfirmSheet(
+                visible = deleteConfirmRecord != null,
+                recordTitle = deleteConfirmRecord?.title ?: "",
+                onConfirm = {
+                    deleteConfirmRecord?.let { record ->
+                        records.remove(record)
+                        saveChatRecords(context, records)
+                        if (selectedRecord == record && records.isNotEmpty()) {
+                            selectedRecord = records.first()
+                            messages.clear()
+                            messages += loadChatMessages(context, selectedRecord.id)
+                        }
+                    }
+                    deleteConfirmRecord = null
+                },
+                onDismiss = { deleteConfirmRecord = null },
+            )
         }
     }
 }
 
 @Composable
 private fun ChatScreen(
+    live2dWebView: WebView,
     selectedPersona: PersonaPreset,
     settings: ModelSettings,
     configuredModels: List<ConfiguredModel>,
@@ -702,7 +761,7 @@ private fun ChatScreen(
                 detectHorizontalDragGestures(
                     onHorizontalDrag = { _, dragAmount -> horizontalDrag += dragAmount },
                     onDragEnd = {
-                        if (horizontalDrag < -92f) {
+                        if (horizontalDrag > 92f) {
                             onHistoryOpen()
                         }
                         horizontalDrag = 0f
@@ -730,6 +789,7 @@ private fun ChatScreen(
                 .fillMaxWidth(),
         ) {
             MainConversationArea(
+                live2dWebView = live2dWebView,
                 modifier = Modifier.matchParentSize(),
                 messages = messages,
                 persona = selectedPersona,
@@ -766,6 +826,7 @@ private fun ChatHistoryScreen(
     onAvatarClick: () -> Unit,
     onNewChat: () -> Unit,
     onRecordClick: (ChatRecord) -> Unit,
+    onDeleteRecord: (ChatRecord) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var horizontalDrag by remember { mutableFloatStateOf(0f) }
@@ -779,7 +840,7 @@ private fun ChatHistoryScreen(
                 detectHorizontalDragGestures(
                     onHorizontalDrag = { _, dragAmount -> horizontalDrag += dragAmount },
                     onDragEnd = {
-                        if (horizontalDrag > 92f) {
+                        if (horizontalDrag < -92f) {
                             onDismiss()
                         }
                         horizontalDrag = 0f
@@ -829,6 +890,8 @@ private fun ChatHistoryScreen(
                     record = record,
                     selected = record == selectedRecord,
                     onClick = { onRecordClick(record) },
+                    onExport = { /* 暂不实现 */ },
+                    onDelete = { onDeleteRecord(record) },
                 )
             }
             item {
@@ -900,7 +963,10 @@ private fun HistoryHeader(
             color = Color(0xFFB59A62),
             contentColor = Color.White,
             shape = CircleShape,
-            onClick = onAvatarClick,
+            onClick = {
+                android.util.Log.d("Amaduse", "HistoryHeader: Avatar Surface onClick triggered")
+                onAvatarClick()
+            },
         ) {
             Box(contentAlignment = Alignment.Center) {
                 Text(
@@ -965,6 +1031,8 @@ private fun HistoryRecordRow(
     record: ChatRecord,
     selected: Boolean,
     onClick: () -> Unit,
+    onExport: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     val background by animateColorAsState(
         targetValue = if (selected) {
@@ -983,26 +1051,57 @@ private fun HistoryRecordRow(
         shape = RoundedCornerShape(16.dp),
         onClick = onClick,
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 2.dp, vertical = 13.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+        Row(
+            modifier = Modifier.padding(horizontal = 2.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = record.title,
-                color = MaterialTheme.colorScheme.onBackground,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Normal,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            AnimatedVisibility(visible = selected) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 Text(
-                    text = record.subtitle,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
+                    text = record.title,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                AnimatedVisibility(visible = selected) {
+                    Text(
+                        text = record.subtitle,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Row {
+                IconButton(
+                    onClick = onExport,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ArrowUpward,
+                        contentDescription = "导出",
+                        tint = Color(0xFF2196F3),
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "删除",
+                        tint = Color(0xFFF44336),
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
             }
         }
     }
@@ -1524,6 +1623,7 @@ private fun ModeSegment(
 
 @Composable
 private fun MainConversationArea(
+    live2dWebView: WebView,
     modifier: Modifier = Modifier,
     messages: List<ChatMessage>,
     persona: PersonaPreset,
@@ -1575,7 +1675,7 @@ private fun MainConversationArea(
                     ),
                 ),
         ) {
-            Live2dStage(modifier = Modifier.matchParentSize())
+            Live2dStage(webView = live2dWebView, modifier = Modifier.matchParentSize())
         }
 
         AnimatedVisibility(
@@ -1620,36 +1720,10 @@ private fun MainConversationArea(
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun Live2dStage(modifier: Modifier = Modifier) {
+private fun Live2dStage(webView: WebView, modifier: Modifier = Modifier) {
     AndroidView(
         modifier = modifier,
-        factory = { context ->
-            WebView(context).apply {
-                setBackgroundColor(android.graphics.Color.rgb(240, 245, 246))
-                isVerticalScrollBarEnabled = false
-                isHorizontalScrollBarEnabled = false
-                overScrollMode = View.OVER_SCROLL_NEVER
-                webChromeClient = object : WebChromeClient() {
-                    override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                        Log.d(
-                            "AmaduseLive2D",
-                            "${consoleMessage.message()} (${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})",
-                        )
-                        return true
-                    }
-                }
-                webViewClient = WebViewClient()
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.allowFileAccess = true
-                settings.allowContentAccess = true
-                settings.allowFileAccessFromFileURLs = true
-                settings.allowUniversalAccessFromFileURLs = true
-                settings.mediaPlaybackRequiresUserGesture = false
-                settings.cacheMode = WebSettings.LOAD_DEFAULT
-                loadUrl("file:///android_asset/live2d_viewer.html")
-            }
-        },
+        factory = { webView },
     )
 }
 
@@ -2872,6 +2946,7 @@ private fun SettingsSheet(
     onApply: (ModelSettings, VoiceSettings, ChatMode, List<ConfiguredModel>) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    android.util.Log.d("Amaduse", "SettingsSheet composable: visible=$visible, sheetMode=$sheetMode")
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn(tween(AmaduseMotion.Default)),
@@ -2986,15 +3061,9 @@ private fun SettingsSheet(
                                 onClick = {},
                             )
                             SettingsMenuRow(
-                                icon = Icons.Rounded.Bolt,
-                                title = "订阅",
-                                value = "Amaduse Lab",
-                                onClick = {},
-                            )
-                            SettingsMenuRow(
                                 icon = Icons.Rounded.Computer,
-                                title = "恢复购买",
-                                value = "",
+                                title = "连接电脑",
+                                value = "未连接",
                                 onClick = {},
                             )
                         }
@@ -3259,23 +3328,6 @@ private fun SettingsSheet(
                     }
 
                     if (sheetMode == SettingsSheetMode.Full) {
-                        SettingsSection(title = "回答模式") {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                ModeCard(
-                                    mode = ChatMode.Fast,
-                                    selected = selectedMode == ChatMode.Fast,
-                                    onClick = { selectedMode = ChatMode.Fast },
-                                    modifier = Modifier.weight(1f),
-                                )
-                                ModeCard(
-                                    mode = ChatMode.Thinking,
-                                    selected = selectedMode == ChatMode.Thinking,
-                                    onClick = { selectedMode = ChatMode.Thinking },
-                                    modifier = Modifier.weight(1f),
-                                )
-                            }
-                        }
-
                         SettingsSection(title = "主题") {
                             SettingsMenuRow(
                                 icon = Icons.Rounded.Settings,
@@ -3727,6 +3779,153 @@ private fun PersonaSheet(
                         onClick = {},
                         modifier = Modifier.weight(1f),
                         icon = Icons.Rounded.Settings,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewChatConfirmSheet(
+    visible: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(AmaduseMotion.Default)),
+        exit = fadeOut(tween(AmaduseMotion.Fast)),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.28f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onDismiss,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 32.dp)
+                    .glassLayer(
+                        shape = RoundedCornerShape(28.dp),
+                        dark = isSystemInDarkTheme(),
+                    )
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = {},
+                    )
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Text(
+                    text = "新建对话",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "当前对话将被保存，是否创建新对话？",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ActionPill(
+                        text = "取消",
+                        selected = false,
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                    )
+                    ActionPill(
+                        text = "确认",
+                        selected = true,
+                        onClick = onConfirm,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeleteConfirmSheet(
+    visible: Boolean,
+    recordTitle: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(AmaduseMotion.Default)),
+        exit = fadeOut(tween(AmaduseMotion.Fast)),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.28f))
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = onDismiss,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 32.dp)
+                    .glassLayer(
+                        shape = RoundedCornerShape(28.dp),
+                        dark = isSystemInDarkTheme(),
+                    )
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = {},
+                    )
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Text(
+                    text = "删除对话",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "确定要删除「${recordTitle}」吗？此操作不可撤销。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ActionPill(
+                        text = "取消",
+                        selected = false,
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                    )
+                    ActionPill(
+                        text = "删除",
+                        selected = true,
+                        onClick = onConfirm,
+                        modifier = Modifier.weight(1f),
                     )
                 }
             }
