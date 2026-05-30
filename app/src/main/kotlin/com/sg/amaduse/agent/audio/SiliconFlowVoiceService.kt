@@ -142,6 +142,14 @@ internal object SiliconFlowVoiceService {
         playbackFinished.await()
     }
 
+    fun stopPlayback() {
+        currentPlayer?.runCatching {
+            stop()
+            release()
+        }
+        currentPlayer = null
+    }
+
     fun getAudioDurationMillis(file: File): Long {
         return runCatching {
             val retriever = MediaMetadataRetriever()

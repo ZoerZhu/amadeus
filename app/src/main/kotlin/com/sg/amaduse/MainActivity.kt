@@ -183,6 +183,7 @@ import com.sg.amaduse.agent.persona.PromptRuntimeContext
 import com.sg.amaduse.agent.persona.personaPresets
 import com.sg.amaduse.agent.tools.AddMemoTool
 import com.sg.amaduse.agent.tools.AgentToolContext
+import com.sg.amaduse.agent.tools.CreateLocalFileTool
 import com.sg.amaduse.agent.tools.SetAlarmTool
 import com.sg.amaduse.agent.tools.TestEmotionTool
 import com.sg.amaduse.agent.tools.TestVoiceTool
@@ -195,6 +196,7 @@ import com.sg.amaduse.ui.theme.glassLayer
 import com.sg.amaduse.ui.theme.iconGlass
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -253,6 +255,7 @@ private fun AmaduseApp() {
     var characterExpanded by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
     var live2dCanvasReady by remember { mutableStateOf(false) }
+    var activeResponseJob by remember { mutableStateOf<Job?>(null) }
     val attachments = remember { mutableStateListOf<ComposerAttachment>() }
     val messages = remember(context) {
         mutableStateListOf<ChatMessage>().apply {
@@ -364,6 +367,7 @@ private fun AmaduseApp() {
         ToolRegistry.register(SetAlarmTool())
         ToolRegistry.register(AddMemoTool())
         ToolRegistry.register(WebSearchTool())
+        ToolRegistry.register(CreateLocalFileTool())
         ctx
     }
 
@@ -477,6 +481,23 @@ private fun AmaduseApp() {
                                 }
                             }
                         },
+                        onStop = {
+                            activeResponseJob?.cancel()
+                            activeResponseJob = null
+                            SiliconFlowVoiceService.stopPlayback()
+                            val streamingIndex = messages.indexOfLast { it.streaming }
+                            if (streamingIndex >= 0) {
+                                val current = messages[streamingIndex]
+                                messages[streamingIndex] = current.copy(
+                                    text = current.text.ifBlank { "已中断。" },
+                                    streaming = false,
+                                    activeToolName = null,
+                                    thinkingExpanded = false,
+                                    showThinking = current.thinking.isNotBlank(),
+                                )
+                                saveChatMessages(context, selectedRecord.id, messages)
+                            }
+                        },
                         onSend = {
                             if (!sending && (draft.isNotBlank() || attachments.isNotEmpty())) {
                                 val outgoingText = draft.ifBlank {
@@ -514,21 +535,29 @@ private fun AmaduseApp() {
                                 characterExpanded = false
                                 saveChatMessages(context, selectedRecord.id, messages)
 
-                                coroutineScope.launch {
-                                    streamAssistantMessage(
-                                        context = context,
-                                        recordId = selectedRecord.id,
-                                        messages = messages,
-                                        assistantIndex = assistantIndex,
-                                        userText = outgoingText,
-                                        persona = selectedPersona,
-                                        mode = selectedMode,
-                                        settings = modelSettings,
-                                        voiceSettings = voiceSettings,
-                                        live2dWebView = live2dWebView,
-                                        agentToolContext = agentToolContext,
-                                    )
+                                lateinit var responseJob: Job
+                                responseJob = coroutineScope.launch {
+                                    try {
+                                        streamAssistantMessage(
+                                            context = context,
+                                            recordId = selectedRecord.id,
+                                            messages = messages,
+                                            assistantIndex = assistantIndex,
+                                            userText = outgoingText,
+                                            persona = selectedPersona,
+                                            mode = selectedMode,
+                                            settings = modelSettings,
+                                            voiceSettings = voiceSettings,
+                                            live2dWebView = live2dWebView,
+                                            agentToolContext = agentToolContext,
+                                        )
+                                    } finally {
+                                        if (activeResponseJob === responseJob) {
+                                            activeResponseJob = null
+                                        }
+                                    }
                                 }
+                                activeResponseJob = responseJob
                             }
                         },
                     )
@@ -775,6 +804,7 @@ private fun ChatScreen(
     onVoiceToggle: () -> Unit,
     onRemoveAttachment: (ComposerAttachment) -> Unit,
     onToolClick: (ToolShortcut) -> Unit,
+    onStop: () -> Unit,
     onSend: () -> Unit,
 ) {
     var horizontalDrag by remember { mutableFloatStateOf(0f) }
@@ -839,6 +869,7 @@ private fun ChatScreen(
                 onVoiceToggle = onVoiceToggle,
                 onRemoveAttachment = onRemoveAttachment,
                 onToolClick = onToolClick,
+                onStop = onStop,
                 onSend = onSend,
             )
         }
@@ -2853,6 +2884,7 @@ private fun ChatComposer(
     onVoiceToggle: () -> Unit,
     onRemoveAttachment: (ComposerAttachment) -> Unit,
     onToolClick: (ToolShortcut) -> Unit,
+    onStop: () -> Unit,
     onSend: () -> Unit,
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -2994,17 +3026,20 @@ private fun ChatComposer(
                         }
                     } else if (state == "streaming") {
                         IconButton(
-                            onClick = {},
-                            enabled = false,
+                            onClick = {
+                                onStop()
+                                keyboardController?.hide()
+                                focusManager.clearFocus()
+                            },
                             colors = IconButtonDefaults.iconButtonColors(
-                                disabledContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
-                                disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.46f),
+                                containerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                                contentColor = MaterialTheme.colorScheme.onSurface,
                             ),
                             modifier = Modifier.size(40.dp),
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.MoreHoriz,
-                                contentDescription = "输出中",
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "中断输出",
                             )
                         }
                     } else {

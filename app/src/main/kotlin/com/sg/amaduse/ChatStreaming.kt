@@ -16,7 +16,9 @@ import com.sg.amaduse.agent.persona.PersonaPreset
 import com.sg.amaduse.agent.persona.PersonaPromptBuilder
 import com.sg.amaduse.agent.persona.PromptMode
 import com.sg.amaduse.agent.persona.PromptRuntimeContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -116,90 +118,107 @@ internal suspend fun streamAssistantMessage(
         }
     }
 
-    val toolCtx = agentToolContext
-    val useAgentLoop = toolCtx != null && shouldUseAgentLoopForInput(
-        settings = settings,
-        history = requestHistory,
-        userText = userText,
-    )
-    val error = if (toolCtx != null && useAgentLoop) {
+    try {
+        val toolCtx = agentToolContext
+        val useAgentLoop = toolCtx != null && shouldUseAgentLoopForInput(
+            settings = settings,
+            history = requestHistory,
+            userText = userText,
+        )
+        val error = if (toolCtx != null && useAgentLoop) {
         // Agent mode: use agent loop with tool support
-        val agentHistory = requestHistory
-            .filter { it.text.isNotBlank() }
-            .takeLast(12)
-            .map { message ->
-                AgentMessage(
-                    role = if (message.isAgent) "assistant" else "user",
-                    content = message.text,
+            val agentHistory = requestHistory
+                .filter { it.text.isNotBlank() }
+                .takeLast(12)
+                .map { message ->
+                    AgentMessage(
+                        role = if (message.isAgent) "assistant" else "user",
+                        content = message.text,
+                    )
+                }
+
+            runAgentLoop(
+                settings = settings,
+                mode = mode,
+                persona = persona,
+                history = agentHistory,
+                toolContext = toolCtx,
+                onContent = { chunk ->
+                    handleContentChunk(chunk)
+                },
+                onThinking = { chunk ->
+                    update { message ->
+                        message.copy(
+                            thinking = message.thinking + chunk,
+                            showThinking = true,
+                            thinkingExpanded = message.thinking.isBlank() || message.thinkingExpanded,
+                        )
+                    }
+                },
+                onToolCall = { toolName, _ ->
+                    update { it.copy(activeToolName = toolName) }
+                },
+            )
+        } else {
+        // Regular streaming mode (no tools)
+            fetchOpenAiCompatibleLiveStream(
+                settings = settings,
+                persona = persona,
+                mode = mode,
+                history = requestHistory,
+                onThinking = { chunk ->
+                    update { message ->
+                        message.copy(
+                            thinking = message.thinking + chunk,
+                            showThinking = true,
+                            thinkingExpanded = message.thinking.isBlank() || message.thinkingExpanded,
+                        )
+                    }
+                },
+                onContent = { chunk ->
+                    handleContentChunk(chunk)
+                },
+            )
+        }
+
+        if (error != null) {
+            splitForStreaming("请求失败：$error").forEach { chunk ->
+                update { it.copy(text = it.text + chunk) }
+                delay(18)
+            }
+        }
+
+        if (error == null) {
+            speechOutput?.finish()
+        } else {
+            speechOutput?.cancel()
+        }
+
+        update { message ->
+            message.copy(
+                streaming = false,
+                activeToolName = null,
+                thinkingExpanded = false,
+                showThinking = message.thinking.isNotBlank(),
+            )
+        }
+        saveChatMessages(context, recordId, messages)
+    } catch (cancelled: CancellationException) {
+        speechOutput?.cancel()
+        withContext(NonCancellable + Dispatchers.Main) {
+            update { message ->
+                message.copy(
+                    text = message.text.ifBlank { "已中断。" },
+                    streaming = false,
+                    activeToolName = null,
+                    thinkingExpanded = false,
+                    showThinking = message.thinking.isNotBlank(),
                 )
             }
-
-        runAgentLoop(
-            settings = settings,
-            mode = mode,
-            persona = persona,
-            history = agentHistory,
-            toolContext = toolCtx,
-            onContent = { chunk ->
-                handleContentChunk(chunk)
-            },
-            onThinking = { chunk ->
-                update { message ->
-                    message.copy(
-                        thinking = message.thinking + chunk,
-                        showThinking = true,
-                        thinkingExpanded = message.thinking.isBlank() || message.thinkingExpanded,
-                    )
-                }
-            },
-            onToolCall = { toolName, _ ->
-                update { it.copy(activeToolName = toolName) }
-            },
-        )
-    } else {
-        // Regular streaming mode (no tools)
-        fetchOpenAiCompatibleLiveStream(
-            settings = settings,
-            persona = persona,
-            mode = mode,
-            history = requestHistory,
-            onThinking = { chunk ->
-                update { message ->
-                    message.copy(
-                        thinking = message.thinking + chunk,
-                        showThinking = true,
-                        thinkingExpanded = message.thinking.isBlank() || message.thinkingExpanded,
-                    )
-                }
-            },
-            onContent = { chunk ->
-                handleContentChunk(chunk)
-            },
-        )
-    }
-
-    if (error != null) {
-        splitForStreaming("请求失败：$error").forEach { chunk ->
-            update { it.copy(text = it.text + chunk) }
-            delay(18)
+            saveChatMessages(context, recordId, messages)
         }
+        throw cancelled
     }
-
-    if (error == null) {
-        speechOutput?.finish()
-    } else {
-        speechOutput?.cancel()
-    }
-
-    update { message ->
-        message.copy(
-            streaming = false,
-            activeToolName = null,
-            thinkingExpanded = false,
-            showThinking = message.thinking.isNotBlank(),
-        )
-    }
-    saveChatMessages(context, recordId, messages)
 }
 
 private suspend fun shouldUseAgentLoopForInput(
@@ -233,6 +252,7 @@ private suspend fun shouldUseAgentLoopForInput(
         - set_alarm：按北京时间直接创建 Android 系统闹钟；“30 分钟后/2 小时后”这类相对提醒也算需要。
         - add_memo：在 Android 官方 Calendar 中创建日历任务/事项；缺少标题、开始时间、结束时间时也需要进入 agent，由 agent 继续追问。
         - web_search：联网搜索公开网页；用户要求“搜索/联网查/最新/今天/新闻/查资料/核实/现在是什么情况”等需要外部实时信息时需要。
+        - create_local_file：创建并保存 txt/md/csv/docx/xlsx 到本地 Documents/Amaduse；缺少文件名、格式或内容时也需要进入 agent，由 agent 继续追问。
         只有用户明确要求执行这些工具操作、当前输入是在补充工具参数，或问题明显需要实时联网信息时，use_agent 才为 true。
         普通知识问答、角色扮演、闲聊、代码解释、设置咨询，一律 false。
         只输出严格 JSON，不要解释：{"use_agent":true} 或 {"use_agent":false}
@@ -340,6 +360,19 @@ private fun looksLikeLocalToolRequest(text: String): Boolean {
         "现在",
         "web search",
         "search",
+        "创建文件",
+        "保存文件",
+        "生成文件",
+        "写入文件",
+        "导出",
+        "txt",
+        "md",
+        "markdown",
+        "csv",
+        "docx",
+        "xlsx",
+        "excel",
+        "word",
     ).any { it in normalized }
 }
 
