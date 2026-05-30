@@ -2,6 +2,7 @@ package com.sg.amaduse
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -65,6 +66,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -151,6 +154,21 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.sg.amaduse.agent.audio.AssistantSpeechConfig
+import com.sg.amaduse.agent.audio.DEFAULT_VOICE_REFERENCE_SOURCE
+import com.sg.amaduse.agent.audio.SpeechOutputCoordinator
+import com.sg.amaduse.agent.audio.SpeechTranslationConfig
+import com.sg.amaduse.agent.audio.SiliconFlowVoiceService
+import com.sg.amaduse.agent.audio.VoiceSettings
+import com.sg.amaduse.agent.model.ChatCompletionMode
+import com.sg.amaduse.agent.model.ChatCompletionModeAdapter
+import com.sg.amaduse.agent.model.ChatCompletionModeConfig
+import com.sg.amaduse.agent.persona.KURISU_REFERENCE_TEXT
+import com.sg.amaduse.agent.persona.PersonaPreset
+import com.sg.amaduse.agent.persona.PersonaPromptBuilder
+import com.sg.amaduse.agent.persona.PromptMode
+import com.sg.amaduse.agent.persona.PromptRuntimeContext
+import com.sg.amaduse.agent.persona.personaPresets
 import com.sg.amaduse.ui.theme.AmaduseMotion
 import com.sg.amaduse.ui.theme.AmaduseStyle
 import com.sg.amaduse.ui.theme.AmaduseTheme
@@ -184,12 +202,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-
-private data class PersonaPreset(
-    val name: String,
-    val subtitle: String,
-    val tone: String,
-)
 
 private data class ChatMessage(
     val author: String,
@@ -276,29 +288,6 @@ private data class ChatRecord(
     val id: String = UUID.randomUUID().toString(),
 )
 
-private val personaPresets = listOf(
-    PersonaPreset(
-        name = "Amaduse",
-        subtitle = "默认人格",
-        tone = "冷静、敏锐、带一点实验室感",
-    ),
-    PersonaPreset(
-        name = "冷静观察者",
-        subtitle = "理性辅助",
-        tone = "先结论，再推理，少量吐槽",
-    ),
-    PersonaPreset(
-        name = "温柔执行官",
-        subtitle = "陪伴与任务",
-        tone = "温和、清楚、主动确认风险",
-    ),
-    PersonaPreset(
-        name = "高效秘书",
-        subtitle = "日程与事务",
-        tone = "短句、结构化、直接给下一步",
-    ),
-)
-
 private val modelProviderPresets = listOf(
     ModelProviderPreset(
         name = "演示模型",
@@ -320,6 +309,13 @@ private val modelProviderPresets = listOf(
         defaultModel = "openai/gpt-4.1-mini",
         compatible = true,
         note = "聚合多家模型，使用 OpenAI-compatible 协议",
+    ),
+    ModelProviderPreset(
+        name = "小米 MiMo",
+        baseUrl = "https://api.xiaomimimo.com/v1",
+        defaultModel = "mimo-v2.5-pro",
+        compatible = true,
+        note = "MiMo OpenAI-compatible 接口，快速模式关闭 thinking，思考模式开启 thinking",
     ),
     ModelProviderPreset(
         name = "DeepSeek",
@@ -423,6 +419,7 @@ private fun AmaduseApp() {
     var selectedPersona by remember { mutableStateOf(personaPresets.first()) }
     var selectedMode by remember { mutableStateOf(loadChatMode(context)) }
     var modelSettings by remember { mutableStateOf(loadModelSettings(context, configuredModels)) }
+    var voiceSettings by remember { mutableStateOf(loadVoiceSettings(context)) }
     var personaSheetVisible by remember { mutableStateOf(false) }
     var settingsVisible by remember { mutableStateOf(false) }
     var settingsSheetMode by remember { mutableStateOf(SettingsSheetMode.Full) }
@@ -620,6 +617,7 @@ private fun AmaduseApp() {
                                         persona = selectedPersona,
                                         mode = selectedMode,
                                         settings = modelSettings,
+                                        voiceSettings = voiceSettings,
                                     )
                                 }
                             }
@@ -631,16 +629,19 @@ private fun AmaduseApp() {
             SettingsSheet(
                 visible = settingsVisible,
                 settings = modelSettings,
+                voiceSettings = voiceSettings,
                 configuredModels = configuredModels,
                 sheetMode = settingsSheetMode,
                 mode = selectedMode,
-                onApply = { nextSettings, nextMode, nextConfiguredModels ->
+                onApply = { nextSettings, nextVoiceSettings, nextMode, nextConfiguredModels ->
                     configuredModels.clear()
                     configuredModels.addAll(nextConfiguredModels)
                     modelSettings = nextSettings
+                    voiceSettings = nextVoiceSettings
                     selectedMode = nextMode
                     saveConfiguredModels(context, configuredModels)
                     saveModelSettings(context, nextSettings)
+                    saveVoiceSettings(context, nextVoiceSettings)
                     saveChatMode(context, nextMode)
                     settingsVisible = false
                 },
@@ -1536,6 +1537,21 @@ private fun MainConversationArea(
     val dark = isSystemInDarkTheme()
 
     BoxWithConstraints(modifier = modifier) {
+        var lockedStageWidth by remember { mutableStateOf(0.dp) }
+        var lockedStageHeight by remember { mutableStateOf(0.dp) }
+        LaunchedEffect(maxWidth, maxHeight) {
+            val widthChanged = lockedStageWidth == 0.dp ||
+                maxWidth > lockedStageWidth + 8.dp ||
+                maxWidth < lockedStageWidth - 8.dp
+            if (widthChanged) {
+                lockedStageWidth = maxWidth
+                lockedStageHeight = maxHeight
+            } else if (maxHeight > lockedStageHeight) {
+                lockedStageHeight = maxHeight
+            }
+        }
+        val stageWidth = if (lockedStageWidth > 0.dp) lockedStageWidth else maxWidth
+        val stageHeight = if (lockedStageHeight > 0.dp) lockedStageHeight else maxHeight
         val collapsedHeight = maxHeight * 0.34f
         val expandedHeight = maxHeight * 0.84f
         val transcriptHeight by animateDpAsState(
@@ -1544,9 +1560,11 @@ private fun MainConversationArea(
             label = "transcript-height",
         )
 
-        Live2dStage(
+        Box(
             modifier = Modifier
-                .matchParentSize()
+                .align(Alignment.TopCenter)
+                .requiredWidth(stageWidth)
+                .requiredHeight(stageHeight)
                 .background(
                     brush = Brush.verticalGradient(
                         colors = if (dark) {
@@ -1556,7 +1574,9 @@ private fun MainConversationArea(
                         },
                     ),
                 ),
-        )
+        ) {
+            Live2dStage(modifier = Modifier.matchParentSize())
+        }
 
         AnimatedVisibility(
             visible = transcriptExpanded,
@@ -1960,6 +1980,7 @@ private fun ChatTranscript(
     }
     var userDetachedFromBottom by remember { mutableStateOf(false) }
     var autoScrolling by remember { mutableStateOf(false) }
+    var previousMessageCount by remember { mutableStateOf(messages.size) }
 
     suspend fun scrollToTranscriptBottom(animated: Boolean) {
         autoScrolling = true
@@ -1999,6 +2020,14 @@ private fun ChatTranscript(
         hasStreamingMessage,
         expanded,
     ) {
+        val hasNewMessage = messages.size > previousMessageCount
+        previousMessageCount = messages.size
+        if (hasNewMessage) {
+            userDetachedFromBottom = false
+            scrollToTranscriptBottom(animated = false)
+            return@LaunchedEffect
+        }
+
         if (!userDetachedFromBottom || isAtBottom) {
             scrollToTranscriptBottom(animated = false)
         }
@@ -2836,10 +2865,11 @@ private fun ComposerIconButton(
 private fun SettingsSheet(
     visible: Boolean,
     settings: ModelSettings,
+    voiceSettings: VoiceSettings,
     configuredModels: List<ConfiguredModel>,
     sheetMode: SettingsSheetMode,
     mode: ChatMode,
-    onApply: (ModelSettings, ChatMode, List<ConfiguredModel>) -> Unit,
+    onApply: (ModelSettings, VoiceSettings, ChatMode, List<ConfiguredModel>) -> Unit,
     onDismiss: () -> Unit,
 ) {
     AnimatedVisibility(
@@ -2859,7 +2889,30 @@ private fun SettingsSheet(
         var model by remember(visible, settings) { mutableStateOf(initialConfigured?.model ?: settings.model) }
         var baseUrl by remember(visible, settings) { mutableStateOf(initialConfigured?.baseUrl ?: settings.baseUrl) }
         var apiKey by remember(visible, settings) { mutableStateOf(initialConfigured?.apiKey ?: settings.apiKey) }
+        var voiceApiKey by remember(visible, voiceSettings) { mutableStateOf(voiceSettings.siliconFlowApiKey) }
+        var voiceReferenceSource by remember(visible, voiceSettings) {
+            mutableStateOf(voiceSettings.referenceAudioSource.ifBlank { DEFAULT_VOICE_REFERENCE_SOURCE })
+        }
+        var voiceUri by remember(visible, voiceSettings) { mutableStateOf(voiceSettings.clonedVoiceUri) }
+        var voiceAutoPlay by remember(visible, voiceSettings) { mutableStateOf(voiceSettings.autoPlay) }
+        var voiceSyncOutput by remember(visible, voiceSettings) { mutableStateOf(voiceSettings.syncTextOutput) }
+        var voiceStatus by remember(visible) { mutableStateOf("") }
+        var voiceCloning by remember(visible) { mutableStateOf(false) }
         var selectedMode by remember(visible, mode) { mutableStateOf(mode) }
+        val sheetCoroutineScope = rememberCoroutineScope()
+        val context = LocalContext.current
+        val voiceFilePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri?.let {
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        it,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
+                voiceReferenceSource = it.toString()
+                voiceStatus = "已选择本地参考音频。克隆前请确认参考文本与音频内容一致。"
+            }
+        }
         val scrollState = rememberScrollState()
 
         Box(
@@ -3050,6 +3103,161 @@ private fun SettingsSheet(
                         )
                     }
 
+                    SettingsSection(title = "硅基流动语音") {
+                        Text(
+                            text = "默认使用 assets 下的 Kurisu 参考音频，也可以选择本地音频文件。克隆成功后保存返回的 speech: voice uri；之后播报只调用 TTS。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                            lineHeight = 18.sp,
+                        )
+                        SettingsTextInput(
+                            label = "SiliconFlow API Key",
+                            value = voiceApiKey,
+                            onValueChange = { voiceApiKey = it },
+                            placeholder = "sk-...",
+                            secret = true,
+                        )
+                        SettingsTextInput(
+                            label = "参考音频地址",
+                            value = voiceReferenceSource,
+                            onValueChange = { voiceReferenceSource = it },
+                            placeholder = DEFAULT_VOICE_REFERENCE_SOURCE,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ActionPill(
+                                text = "选择本地音频",
+                                selected = false,
+                                onClick = {
+                                    voiceFilePicker.launch(arrayOf("audio/*", "application/octet-stream"))
+                                },
+                                modifier = Modifier.weight(1f),
+                                icon = Icons.Rounded.AttachFile,
+                            )
+                            ActionPill(
+                                text = "恢复默认",
+                                selected = false,
+                                onClick = {
+                                    voiceReferenceSource = DEFAULT_VOICE_REFERENCE_SOURCE
+                                    voiceStatus = "已恢复为 assets 下的 Kurisu 默认参考音频。"
+                                },
+                                modifier = Modifier.weight(1f),
+                                icon = Icons.Rounded.Check,
+                            )
+                        }
+                        SettingsTextInput(
+                            label = "Voice URI",
+                            value = voiceUri,
+                            onValueChange = { voiceUri = it },
+                            placeholder = "speech:...",
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ActionPill(
+                                text = if (voiceCloning) "克隆中" else "克隆参考音频",
+                                selected = true,
+                                onClick = {
+                                    if (voiceCloning) {
+                                        return@ActionPill
+                                    }
+                                    if (voiceApiKey.isBlank()) {
+                                        voiceStatus = "请先填写 SiliconFlow API Key。"
+                                        return@ActionPill
+                                    }
+                                    voiceCloning = true
+                                    voiceStatus = "正在上传参考音频并克隆..."
+                                    sheetCoroutineScope.launch {
+                                        val result = runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                SiliconFlowVoiceService.cloneVoiceFromSource(
+                                                    context = context,
+                                                    apiKey = voiceApiKey.trim(),
+                                                    audioSource = voiceReferenceSource.trim()
+                                                        .ifBlank { DEFAULT_VOICE_REFERENCE_SOURCE },
+                                                    referenceText = KURISU_REFERENCE_TEXT,
+                                                    customName = "amaduse_kurisu_${System.currentTimeMillis()}",
+                                                )
+                                            }
+                                        }
+                                        result
+                                            .onSuccess {
+                                                voiceUri = it
+                                                voiceStatus = "克隆完成，已写入 Voice URI。保存设置后生效。"
+                                            }
+                                            .onFailure {
+                                                voiceStatus = "克隆失败：${it.message ?: it.javaClass.simpleName}"
+                                            }
+                                        voiceCloning = false
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                icon = Icons.Rounded.Mic,
+                            )
+                            ActionPill(
+                                text = "测试播放",
+                                selected = false,
+                                onClick = {
+                                    val voice = voiceUri.ifBlank {
+                                        personaPresets.firstOrNull { it.ttsVoiceId != null }?.ttsVoiceId.orEmpty()
+                                    }
+                                    if (voiceApiKey.isBlank() || voice.isBlank()) {
+                                        voiceStatus = "请先填写 API Key 和 Voice URI。"
+                                        return@ActionPill
+                                    }
+                                    voiceStatus = "正在生成测试语音..."
+                                    sheetCoroutineScope.launch {
+                                        val result = runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                SiliconFlowVoiceService.synthesizeSpeechToCacheFile(
+                                                    context = context,
+                                                    apiKey = voiceApiKey.trim(),
+                                                    input = "助手？别用那种奇怪的称呼。有什么问题就快点说。",
+                                                    voice = voice,
+                                                )
+                                            }
+                                        }
+                                        result
+                                            .onSuccess {
+                                                SiliconFlowVoiceService.playAudioFile(it)
+                                                voiceStatus = "测试语音已生成并播放。"
+                                            }
+                                            .onFailure {
+                                                voiceStatus = "测试失败：${it.message ?: it.javaClass.simpleName}"
+                                            }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                icon = Icons.Rounded.Bolt,
+                            )
+                        }
+                        ActionPill(
+                            text = if (voiceAutoPlay) "自动播报：开" else "自动播报：关",
+                            selected = voiceAutoPlay,
+                            onClick = { voiceAutoPlay = !voiceAutoPlay },
+                            modifier = Modifier.fillMaxWidth(),
+                            icon = Icons.Rounded.Check,
+                        )
+                        ActionPill(
+                            text = if (voiceSyncOutput) "语音文本同步：开" else "语音文本同步：关",
+                            selected = voiceSyncOutput,
+                            onClick = { voiceSyncOutput = !voiceSyncOutput },
+                            modifier = Modifier.fillMaxWidth(),
+                            icon = Icons.Rounded.Bolt,
+                        )
+                        Text(
+                            text = "同步开启时，会先收完整模型回复，翻译并生成日语语音后，再让文本流式显示并同时播放语音。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                            lineHeight = 18.sp,
+                        )
+                        if (voiceStatus.isNotBlank()) {
+                            Text(
+                                text = voiceStatus,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                                lineHeight = 18.sp,
+                            )
+                        }
+                    }
+
                     if (sheetMode == SettingsSheetMode.Full) {
                         SettingsSection(title = "回答模式") {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3142,6 +3350,14 @@ private fun SettingsSheet(
                             }
                             onApply(
                                 savedModel.toModelSettings(),
+                                VoiceSettings(
+                                    siliconFlowApiKey = voiceApiKey.trim(),
+                                    referenceAudioSource = voiceReferenceSource.trim()
+                                        .ifBlank { DEFAULT_VOICE_REFERENCE_SOURCE },
+                                    clonedVoiceUri = voiceUri.trim(),
+                                    autoPlay = voiceAutoPlay,
+                                    syncTextOutput = voiceSyncOutput,
+                                ),
                                 selectedMode,
                                 configured.toList(),
                             )
@@ -3693,6 +3909,7 @@ private suspend fun streamAssistantMessage(
     persona: PersonaPreset,
     mode: ChatMode,
     settings: ModelSettings,
+    voiceSettings: VoiceSettings,
 ) {
     fun update(transform: (ChatMessage) -> ChatMessage) {
         if (assistantIndex in messages.indices) {
@@ -3701,6 +3918,15 @@ private suspend fun streamAssistantMessage(
     }
 
     val requestHistory = messages.take(assistantIndex)
+    val speechOutput = SpeechOutputCoordinator.create(
+        context = context,
+        voiceSettings = voiceSettings,
+        translationConfig = settings.toSpeechTranslationConfig(),
+        speechConfig = AssistantSpeechConfig(
+            voiceOutputLanguageCode = persona.voiceOutputLanguage.code,
+            fallbackVoiceUri = persona.ttsVoiceId,
+        ),
+    )
 
     val error = fetchOpenAiCompatibleLiveStream(
         settings = settings,
@@ -3717,7 +3943,9 @@ private suspend fun streamAssistantMessage(
             }
         },
         onContent = { chunk ->
-            update { it.copy(text = it.text + chunk) }
+            speechOutput?.onContent(chunk) { textChunk ->
+                update { it.copy(text = it.text + textChunk) }
+            } ?: update { it.copy(text = it.text + chunk) }
         },
     )
 
@@ -3726,6 +3954,14 @@ private suspend fun streamAssistantMessage(
             update { it.copy(text = it.text + chunk) }
             delay(18)
         }
+    }
+
+    if (error == null) {
+        speechOutput?.finish { textChunk ->
+            update { it.copy(text = it.text + textChunk) }
+        }
+    } else {
+        speechOutput?.cancel()
     }
 
     update { message ->
@@ -3784,10 +4020,12 @@ private suspend fun fetchOpenAiCompatibleLiveStream(
                 )
             }
 
-        val payload = JSONObject()
-            .put("model", settings.model.ifBlank { settings.provider.defaultModel })
-            .put("stream", true)
-            .put("messages", payloadMessages)
+        val completionMode = mode.toChatCompletionMode()
+        val payload = ChatCompletionModeAdapter.buildPayload(
+            config = settings.toChatCompletionModeConfig(),
+            mode = completionMode,
+            payloadMessages = payloadMessages,
+        )
 
         connection.outputStream.use { output ->
             output.write(payload.toString().toByteArray(Charsets.UTF_8))
@@ -3814,9 +4052,13 @@ private suspend fun fetchOpenAiCompatibleLiveStream(
                     val choice = json.optJSONArray("choices")?.optJSONObject(0)
                     val delta = choice?.optJSONObject("delta")
                     val content = cleanDisplayText(cleanStreamChunk(delta.cleanString("content")))
-                    val reasoning = cleanDisplayText(cleanStreamChunk(delta.cleanString("reasoning_content")))
-                        .ifBlank { cleanDisplayText(cleanStreamChunk(delta.cleanString("reasoning"))) }
-                    if (reasoning.isNotBlank()) {
+                    val reasoning = if (completionMode.shouldReadReasoning) {
+                        cleanDisplayText(cleanStreamChunk(delta.cleanString("reasoning_content")))
+                            .ifBlank { cleanDisplayText(cleanStreamChunk(delta.cleanString("reasoning"))) }
+                    } else {
+                        ""
+                    }
+                    if (completionMode.shouldReadReasoning && reasoning.isNotBlank()) {
                         withContext(Dispatchers.Main) { onThinking(reasoning) }
                     }
                     if (content.isNotBlank()) {
@@ -3837,17 +4079,55 @@ private fun buildSystemPrompt(
     persona: PersonaPreset,
     mode: ChatMode,
 ): String {
-    return buildString {
-        append("你是 Amaduse Android App 中的个性化智能 Agent。")
-        append("当前人格：${persona.name}。语气：${persona.tone}。")
-        append("回答应自然、简洁、具备人格感。")
-        if (mode == ChatMode.Fast) {
-            append("当前为快速模式：直接回答，减少铺垫。")
-        } else {
-            append("当前为思考模式：可以输出简短 reasoning_content 或在回答前给出高层次分析摘要。")
-        }
-        append("涉及闹钟、短信、消息回复、电脑任务等真实操作时，必须先说明需要用户确认。")
+    return PersonaPromptBuilder.build(
+        persona = persona,
+        context = PromptRuntimeContext(
+            userName = "用户",
+            currentTimeText = currentPromptTimeText(),
+            mode = mode.toPromptMode(),
+        ),
+    )
+}
+
+private fun ChatMode.toPromptMode(): PromptMode {
+    return when (this) {
+        ChatMode.Fast -> PromptMode.Fast
+        ChatMode.Thinking -> PromptMode.Thinking
     }
+}
+
+private fun ChatMode.toChatCompletionMode(): ChatCompletionMode {
+    return when (this) {
+        ChatMode.Fast -> ChatCompletionMode.Fast
+        ChatMode.Thinking -> ChatCompletionMode.Thinking
+    }
+}
+
+private fun ModelSettings.toChatCompletionModeConfig(): ChatCompletionModeConfig {
+    return ChatCompletionModeConfig(
+        providerName = provider.name,
+        providerBaseUrl = provider.baseUrl,
+        baseUrl = baseUrl,
+        model = model,
+        defaultModel = provider.defaultModel,
+    )
+}
+
+private fun ModelSettings.toSpeechTranslationConfig(): SpeechTranslationConfig {
+    return SpeechTranslationConfig(
+        useRemote = useRemote,
+        providerCompatible = provider.compatible,
+        providerName = provider.name,
+        baseUrl = baseUrl,
+        apiKey = apiKey,
+        completionConfig = toChatCompletionModeConfig(),
+    )
+}
+
+private fun currentPromptTimeText(): String {
+    return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).apply {
+        timeZone = TimeZone.getTimeZone("Asia/Shanghai")
+    }.format(Date())
 }
 
 private fun splitForStreaming(text: String): List<String> {
@@ -4019,6 +4299,30 @@ private fun saveModelSettings(context: Context, settings: ModelSettings) {
         .putString("base_url", settings.baseUrl)
         .putString("api_key", settings.apiKey)
         .putBoolean("use_remote", settings.useRemote)
+        .apply()
+}
+
+private fun loadVoiceSettings(context: Context): VoiceSettings {
+    val prefs = context.getSharedPreferences("amaduse_voice_settings", Context.MODE_PRIVATE)
+    return VoiceSettings(
+        siliconFlowApiKey = prefs.getString("siliconflow_api_key", "").orEmpty(),
+        referenceAudioSource = prefs.getString("reference_audio_source", DEFAULT_VOICE_REFERENCE_SOURCE)
+            .orEmpty()
+            .ifBlank { DEFAULT_VOICE_REFERENCE_SOURCE },
+        clonedVoiceUri = prefs.getString("cloned_voice_uri", "").orEmpty(),
+        autoPlay = prefs.getBoolean("auto_play", false),
+        syncTextOutput = prefs.getBoolean("sync_text_output", true),
+    )
+}
+
+private fun saveVoiceSettings(context: Context, settings: VoiceSettings) {
+    context.getSharedPreferences("amaduse_voice_settings", Context.MODE_PRIVATE)
+        .edit()
+        .putString("siliconflow_api_key", settings.siliconFlowApiKey)
+        .putString("reference_audio_source", settings.referenceAudioSource.ifBlank { DEFAULT_VOICE_REFERENCE_SOURCE })
+        .putString("cloned_voice_uri", settings.clonedVoiceUri)
+        .putBoolean("auto_play", settings.autoPlay)
+        .putBoolean("sync_text_output", settings.syncTextOutput)
         .apply()
 }
 

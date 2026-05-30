@@ -150,7 +150,8 @@
         antialias: true,
         autoStart: true,
         preserveDrawingBuffer: true,
-        resizeTo: window
+        width: window.innerWidth,
+        height: window.innerHeight
       });
 
       app.view.className = "webgl-source";
@@ -168,9 +169,24 @@
       fitModel(app, model);
       presentWebglFrame(app);
 
+      let stableWidth = app.renderer.width;
+      let stableHeight = app.renderer.height;
       window.addEventListener("resize", () => {
+        const nextWidth = window.innerWidth;
+        const nextHeight = window.innerHeight;
+        const likelyImeResize = Math.abs(nextWidth - stableWidth) < 4 && nextHeight < stableHeight * 0.78;
+        if (likelyImeResize) {
+          report("ignore ime resize " + nextWidth + "x" + nextHeight);
+          presentWebglFrame(app);
+          return;
+        }
+
+        stableWidth = nextWidth;
+        stableHeight = nextHeight;
+        app.renderer.resize(stableWidth, stableHeight);
         resizePresenter(app);
         fitModel(app, model);
+        presentWebglFrame(app);
       });
 
       let lastPresented = 0;
