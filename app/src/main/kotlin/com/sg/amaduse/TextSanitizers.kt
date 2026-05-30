@@ -25,9 +25,11 @@ internal fun JSONObject?.cleanString(key: String): String {
 }
 
 internal fun cleanStreamChunk(value: String): String {
+    if (value.isEmpty()) {
+        return ""
+    }
     val trimmed = value.trim()
     return when {
-        trimmed.isBlank() -> ""
         trimmed.equals("null", ignoreCase = true) -> ""
         trimmed.allNullTokens() -> ""
         else -> value

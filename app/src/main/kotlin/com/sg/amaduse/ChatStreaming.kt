@@ -48,6 +48,18 @@ internal suspend fun streamAssistantMessage(
     }
 
     val requestHistory = messages.take(assistantIndex)
+    var emittedDisplayBuffer = ""
+
+    suspend fun emitAssistantText(chunk: String) {
+        if (chunk.isEmpty()) {
+            return
+        }
+        withContext(Dispatchers.Main) {
+            emittedDisplayBuffer += chunk
+            update { it.copy(text = emittedDisplayBuffer, activeToolName = null) }
+        }
+    }
+
     val speechOutput = SpeechOutputCoordinator.create(
         context = context,
         voiceSettings = voiceSettings,
@@ -56,6 +68,7 @@ internal suspend fun streamAssistantMessage(
             voiceOutputLanguageCode = persona.voiceOutputLanguage.code,
             fallbackVoiceUri = persona.ttsVoiceId,
         ),
+        emitText = ::emitAssistantText,
     )
 
     val emotionRegex = Regex("\\[emotion:(\\w+)]")
@@ -65,7 +78,11 @@ internal suspend fun streamAssistantMessage(
     var displayedBuffer = ""
 
     suspend fun handleContentChunk(chunk: String) {
-        rawBuffer += chunk
+        val safeChunk = cleanDisplayText(cleanStreamChunk(chunk))
+        if (safeChunk.isEmpty()) {
+            return
+        }
+        rawBuffer += safeChunk
         if (!emotionFired) {
             val match = emotionRegex.find(rawBuffer)
             if (match != null) {
@@ -80,14 +97,23 @@ internal suspend fun streamAssistantMessage(
         val nextDisplayText = rawBuffer.stripEmotionTagsForDisplay(emotionRegex)
         val cleanChunk = nextDisplayText.removePrefix(displayedBuffer)
         displayedBuffer = nextDisplayText
-        if (cleanChunk.isBlank()) {
-            update { it.copy(text = nextDisplayText) }
+        if (cleanChunk.isEmpty()) {
+            if (speechOutput == null) {
+                emittedDisplayBuffer = nextDisplayText
+                update { it.copy(text = nextDisplayText, activeToolName = null) }
+            } else {
+                update { it.copy(activeToolName = null) }
+            }
             return
         }
 
-        speechOutput?.onContent(cleanChunk) { _ ->
+        if (speechOutput != null) {
+            update { it.copy(activeToolName = null) }
+            speechOutput.onContent(cleanChunk)
+        } else {
+            emittedDisplayBuffer = nextDisplayText
             update { it.copy(text = nextDisplayText, activeToolName = null) }
-        } ?: update { it.copy(text = nextDisplayText, activeToolName = null) }
+        }
     }
 
     val toolCtx = agentToolContext
@@ -160,9 +186,7 @@ internal suspend fun streamAssistantMessage(
     }
 
     if (error == null) {
-        speechOutput?.finish { textChunk ->
-            update { it.copy(text = it.text + textChunk) }
-        }
+        speechOutput?.finish()
     } else {
         speechOutput?.cancel()
     }
@@ -208,8 +232,9 @@ private suspend fun shouldUseAgentLoopForInput(
         - test_emotion：测试 Live2D 表情或动作。
         - set_alarm：按北京时间直接创建 Android 系统闹钟；“30 分钟后/2 小时后”这类相对提醒也算需要。
         - add_memo：在 Android 官方 Calendar 中创建日历任务/事项；缺少标题、开始时间、结束时间时也需要进入 agent，由 agent 继续追问。
-        只有用户明确要求执行这些本地操作，或当前输入是在补充这些操作所需参数时，use_agent 才为 true。
-        普通聊天、知识问答、角色扮演、闲聊、代码解释、设置咨询，一律 false。
+        - web_search：联网搜索公开网页；用户要求“搜索/联网查/最新/今天/新闻/查资料/核实/现在是什么情况”等需要外部实时信息时需要。
+        只有用户明确要求执行这些工具操作、当前输入是在补充工具参数，或问题明显需要实时联网信息时，use_agent 才为 true。
+        普通知识问答、角色扮演、闲聊、代码解释、设置咨询，一律 false。
         只输出严格 JSON，不要解释：{"use_agent":true} 或 {"use_agent":false}
     """.trimIndent()
 
@@ -302,6 +327,19 @@ private fun looksLikeLocalToolRequest(text: String): Boolean {
         "表情",
         "live2d",
         "emotion",
+        "搜索",
+        "联网",
+        "网上",
+        "查一下",
+        "查找",
+        "查资料",
+        "核实",
+        "最新",
+        "新闻",
+        "今天",
+        "现在",
+        "web search",
+        "search",
     ).any { it in normalized }
 }
 
@@ -408,7 +446,7 @@ private suspend fun fetchOpenAiCompatibleLiveStream(
                     if (completionMode.shouldReadReasoning && reasoning.isNotBlank()) {
                         withContext(Dispatchers.Main) { onThinking(reasoning) }
                     }
-                    if (content.isNotBlank()) {
+                    if (content.isNotEmpty()) {
                         withContext(Dispatchers.Main) { onContent(content) }
                     }
                 }

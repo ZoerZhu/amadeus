@@ -3,13 +3,28 @@ package com.sg.amaduse.agent.audio
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
+
+private const val SPEECH_SEGMENT_TARGET_CHAR_COUNT = 50
+private const val SPEECH_SEGMENT_MAX_CHAR_COUNT = 80
+private const val SPEECH_PREPARE_CONCURRENCY = 2
+private const val SPEECH_TTS_MAX_ATTEMPTS = 2
+private const val SYNC_TEXT_STREAM_CHUNK_SIZE = 4
+private const val SYNC_TEXT_STREAM_FALLBACK_DELAY_MS = 300L
+private const val SYNC_TEXT_STREAM_MIN_DELAY_MS = 40L
+private const val SYNC_TEXT_STREAM_MAX_DELAY_MS = 300L
+private const val SYNC_TEXT_STREAM_UNVOICED_DELAY_MS = 45L
 
 internal class SpeechOutputCoordinator private constructor(
     private val context: Context,
@@ -17,120 +32,38 @@ internal class SpeechOutputCoordinator private constructor(
     private val translationConfig: SpeechTranslationConfig,
     private val speechConfig: AssistantSpeechConfig,
     private val voiceUri: String,
+    private val emitText: suspend (String) -> Unit,
 ) {
-    private val capturedText = StringBuilder()
-    private val segmentStreamer = if (shouldSynchronize()) {
-        null
-    } else {
-        JapaneseSpeechSegmentStreamer(
-            context = context,
-            voiceSettings = voiceSettings,
-            translationConfig = translationConfig,
-            speechConfig = speechConfig,
-            voiceUri = voiceUri,
-        )
-    }
+    private val segmentStreamer = SpeechSegmentStreamer(
+        context = context,
+        voiceSettings = voiceSettings,
+        translationConfig = translationConfig,
+        speechConfig = speechConfig,
+        voiceUri = voiceUri,
+        synchronizeText = shouldSynchronize(),
+        emitText = emitText,
+    )
 
-    fun onContent(
-        chunk: String,
-        emitText: (String) -> Unit,
-    ) {
-        if (chunk.isBlank()) {
-            return
-        }
-        if (shouldSynchronize()) {
-            capturedText.append(chunk)
+    suspend fun onContent(chunk: String) {
+        if (chunk.isEmpty()) {
             return
         }
 
-        emitText(chunk)
-        segmentStreamer?.accept(chunk)
-    }
-
-    suspend fun finish(emitText: suspend (String) -> Unit) {
         if (!shouldSynchronize()) {
-            segmentStreamer?.finish()
-            return
+            emitText(chunk)
         }
+        segmentStreamer.accept(chunk)
+    }
 
-        val displayText = capturedText.toString().trim()
-        if (displayText.isBlank()) {
-            return
-        }
-
-        val audioFile = runCatching {
-            withContext(Dispatchers.IO) {
-                val speechText = displayText.toSpeechText()
-                SiliconFlowVoiceService.synthesizeSpeechToCacheFile(
-                    context = context,
-                    apiKey = voiceSettings.siliconFlowApiKey,
-                    input = speechText,
-                    voice = voiceUri,
-                )
-            }
-        }.getOrElse { error ->
-            Log.w("AmaduseVoice", "Synchronized TTS failed: ${error.message}", error)
-            emitTextInChunks(displayText, 18L, emitText)
-            return
-        }
-
-        val durationMs = SiliconFlowVoiceService.getAudioDurationMillis(audioFile)
-            .takeIf { it > 0L }
-            ?: estimateSpeechDurationMillis(displayText)
-        SiliconFlowVoiceService.playAudioFile(audioFile)
-        emitTextInChunks(displayText, durationMs, emitText)
+    suspend fun finish() {
+        segmentStreamer.finish(waitForPlayback = shouldSynchronize())
     }
 
     fun cancel() {
-        segmentStreamer?.cancel()
+        segmentStreamer.cancel()
     }
 
     private fun shouldSynchronize(): Boolean = voiceSettings.syncTextOutput
-
-    private fun String.toSpeechText(): String {
-        return if (speechConfig.voiceOutputLanguageCode == "ja") {
-            JapaneseSpeechTranslator.translateForSpeech(translationConfig, this)
-        } else {
-            this
-        }
-    }
-
-    private suspend fun emitTextInChunks(
-        text: String,
-        targetDurationMs: Long,
-        emitText: suspend (String) -> Unit,
-    ) {
-        val chunks = text.chunkForSynchronizedDisplay()
-        val delayMs = if (chunks.isEmpty()) {
-            0L
-        } else {
-            (targetDurationMs / chunks.size).coerceIn(18L, 220L)
-        }
-        chunks.forEach { chunk ->
-            emitText(chunk)
-            if (delayMs > 0L) {
-                delay(delayMs)
-            }
-        }
-    }
-
-    private fun String.chunkForSynchronizedDisplay(): List<String> {
-        if (isBlank()) {
-            return emptyList()
-        }
-        val chunks = mutableListOf<String>()
-        var index = 0
-        while (index < length) {
-            val next = (index + 2).coerceAtMost(length)
-            chunks += substring(index, next)
-            index = next
-        }
-        return chunks
-    }
-
-    private fun estimateSpeechDurationMillis(text: String): Long {
-        return (text.length * 140L).coerceAtLeast(1_200L)
-    }
 
     companion object {
         fun create(
@@ -138,6 +71,7 @@ internal class SpeechOutputCoordinator private constructor(
             voiceSettings: VoiceSettings,
             translationConfig: SpeechTranslationConfig,
             speechConfig: AssistantSpeechConfig,
+            emitText: suspend (String) -> Unit,
         ): SpeechOutputCoordinator? {
             if (!voiceSettings.autoPlay || voiceSettings.siliconFlowApiKey.isBlank()) {
                 return null
@@ -154,99 +88,251 @@ internal class SpeechOutputCoordinator private constructor(
                 translationConfig = translationConfig,
                 speechConfig = speechConfig,
                 voiceUri = voice,
+                emitText = emitText,
             )
         }
     }
 }
 
-private class JapaneseSpeechSegmentStreamer(
+private class SpeechSegmentStreamer(
     private val context: Context,
     private val voiceSettings: VoiceSettings,
     private val translationConfig: SpeechTranslationConfig,
     private val speechConfig: AssistantSpeechConfig,
     private val voiceUri: String,
+    private val synchronizeText: Boolean,
+    private val emitText: suspend (String) -> Unit,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val segments = Channel<String>(Channel.UNLIMITED)
+    private val preparedSegments = Channel<Deferred<PreparedSpeechSegment>>(Channel.UNLIMITED)
+    private val prepareSemaphore = Semaphore(SPEECH_PREPARE_CONCURRENCY)
     private val textBuffer = StringBuilder()
 
-    init {
-        scope.launch {
-            for (segment in segments) {
-                val displayText = segment.trim()
-                if (displayText.isBlank()) {
-                    continue
+    private val prepareJob = scope.launch {
+        for (segment in segments) {
+            preparedSegments.send(async {
+                prepareSemaphore.withPermit {
+                    prepareSegment(segment)
                 }
-                runCatching {
-                    val speechText = if (speechConfig.voiceOutputLanguageCode == "ja") {
-                        JapaneseSpeechTranslator.translateForSpeech(translationConfig, displayText)
-                    } else {
-                        displayText
-                    }
-                    val audioFile = SiliconFlowVoiceService.synthesizeSpeechToCacheFile(
-                        context = context,
-                        apiKey = voiceSettings.siliconFlowApiKey,
-                        input = speechText,
-                        voice = voiceUri,
-                    )
-                    SiliconFlowVoiceService.playAudioFileBlocking(audioFile)
-                }.onFailure {
-                    Log.w("AmaduseVoice", "Segment TTS failed: ${it.message}", it)
-                }
-            }
+            })
+        }
+        preparedSegments.close()
+    }
+
+    private val playbackJob = scope.launch {
+        for (preparedSegment in preparedSegments) {
+            playPreparedSegment(preparedSegment.await())
         }
     }
 
     fun accept(chunk: String) {
-        if (chunk.isBlank()) {
+        if (chunk.isEmpty()) {
             return
         }
         textBuffer.append(chunk)
         flushCompletedSegments(force = false)
     }
 
-    fun finish() {
+    suspend fun finish(waitForPlayback: Boolean) {
         flushCompletedSegments(force = true)
         segments.close()
+        if (waitForPlayback) {
+            playbackJob.join()
+        }
     }
 
     fun cancel() {
-        segments.close()
+        scope.cancel()
     }
 
     private fun flushCompletedSegments(force: Boolean) {
         while (true) {
             val text = textBuffer.toString()
-            val breakIndex = text.indexOfFirstHardBreak()
-            val index = when {
-                breakIndex >= 0 -> breakIndex
-                textBuffer.length >= 80 -> text.lastSoftBreakBefore(80)
-                force && text.isNotBlank() -> text.length - 1
-                else -> -1
-            }
+            val index = text.findSpeechSegmentEndIndex(force)
             if (index < 0) {
                 return
             }
 
-            val segment = text.substring(0, index + 1).trim()
+            val segment = text.substring(0, index + 1)
             textBuffer.delete(0, index + 1)
-            if (segment.isNotBlank()) {
+            if (segment.isNotEmpty()) {
                 segments.trySend(segment)
             }
         }
     }
 
-    private fun String.indexOfFirstHardBreak(): Int {
-        return indexOfFirst { it in setOf('。', '！', '？', '!', '?', '；', ';', '\n') }
+    private suspend fun prepareSegment(displayText: String): PreparedSpeechSegment {
+        val sourceText = displayText.toSpeechSourceText()
+        if (sourceText.isBlank()) {
+            return PreparedSpeechSegment(displayText = displayText, audioFile = null, audioDurationMs = 0L)
+        }
+
+        return runCatching {
+            val speechText = if (speechConfig.voiceOutputLanguageCode == "ja") {
+                JapaneseSpeechTranslator.translateForSpeech(translationConfig, sourceText)
+            } else {
+                sourceText
+            }.toTtsInputText()
+
+            if (speechText.isBlank()) {
+                PreparedSpeechSegment(displayText = displayText, audioFile = null, audioDurationMs = 0L)
+            } else {
+                val audioFile = synthesizeSpeechWithRetry(speechText)
+                PreparedSpeechSegment(
+                    displayText = displayText,
+                    audioFile = audioFile,
+                    audioDurationMs = SiliconFlowVoiceService.getAudioDurationMillis(audioFile)
+                        .takeIf { it > 0L }
+                        ?: estimateSpeechDurationMillis(speechText),
+                )
+            }
+        }.getOrElse { error ->
+            Log.w("AmaduseVoice", "Segment TTS preparation failed: ${error.message}", error)
+            PreparedSpeechSegment(displayText = displayText, audioFile = null, audioDurationMs = 0L)
+        }
     }
 
-    private fun String.lastSoftBreakBefore(limit: Int): Int {
-        val end = length.coerceAtMost(limit)
-        for (index in end - 1 downTo 0) {
-            if (this[index] in setOf('，', ',', '、', ' ')) {
+    private suspend fun synthesizeSpeechWithRetry(speechText: String): File {
+        var lastError: Throwable? = null
+        repeat(SPEECH_TTS_MAX_ATTEMPTS) { attempt ->
+            runCatching {
+                return SiliconFlowVoiceService.synthesizeSpeechToCacheFile(
+                    context = context,
+                    apiKey = voiceSettings.siliconFlowApiKey,
+                    input = speechText,
+                    voice = voiceUri,
+                )
+            }.onFailure { error ->
+                lastError = error
+                if (attempt < SPEECH_TTS_MAX_ATTEMPTS - 1) {
+                    delay(450L * (attempt + 1))
+                }
+            }
+        }
+        throw lastError ?: IllegalStateException("TTS synthesis failed")
+    }
+
+    private suspend fun playPreparedSegment(segment: PreparedSpeechSegment) {
+        val textJob = if (synchronizeText) {
+            scope.launch {
+                emitDisplayTextAsStream(
+                    text = segment.displayText,
+                    audioDurationMs = segment.audioDurationMs,
+                    hasAudio = segment.audioFile != null,
+                )
+            }
+        } else {
+            null
+        }
+
+        try {
+            segment.audioFile?.let {
+                SiliconFlowVoiceService.playAudioFileBlocking(it)
+            }
+        } catch (error: Exception) {
+            Log.w("AmaduseVoice", "Segment playback failed: ${error.message}", error)
+        } finally {
+            textJob?.join()
+        }
+    }
+
+    private suspend fun emitDisplayTextAsStream(
+        text: String,
+        audioDurationMs: Long,
+        hasAudio: Boolean,
+    ) {
+        val chunks = text.chunked(SYNC_TEXT_STREAM_CHUNK_SIZE)
+        val chunkDelayMs = textStreamDelayMillis(
+            chunkCount = chunks.size,
+            audioDurationMs = audioDurationMs,
+            hasAudio = hasAudio,
+        )
+        chunks.forEach { chunk ->
+            withContext(Dispatchers.Main) {
+                emitText(chunk)
+            }
+            if (chunkDelayMs > 0L) {
+                delay(chunkDelayMs)
+            }
+        }
+    }
+
+    private fun textStreamDelayMillis(
+        chunkCount: Int,
+        audioDurationMs: Long,
+        hasAudio: Boolean,
+    ): Long {
+        if (chunkCount <= 1) {
+            return 0L
+        }
+        if (!hasAudio) {
+            return SYNC_TEXT_STREAM_UNVOICED_DELAY_MS
+        }
+        if (audioDurationMs <= 0L) {
+            return SYNC_TEXT_STREAM_FALLBACK_DELAY_MS
+        }
+        return (audioDurationMs / chunkCount).coerceIn(
+            SYNC_TEXT_STREAM_MIN_DELAY_MS,
+            SYNC_TEXT_STREAM_MAX_DELAY_MS,
+        )
+    }
+
+    private fun estimateSpeechDurationMillis(speechText: String): Long {
+        val meaningfulLength = speechText.count { it.isMeaningfulSpeechChar() }
+        return (meaningfulLength * 130L).coerceIn(1_200L, 18_000L)
+    }
+}
+
+private data class PreparedSpeechSegment(
+    val displayText: String,
+    val audioFile: File?,
+    val audioDurationMs: Long,
+)
+
+private fun String.findSpeechSegmentEndIndex(force: Boolean): Int {
+    if (isBlank()) {
+        return -1
+    }
+
+    var meaningfulCount = 0
+    var lastSoftBreakIndex = -1
+    var lastHardBreakIndex = -1
+
+    forEachIndexed { index, char ->
+        if (char.isMeaningfulSpeechChar()) {
+            meaningfulCount += 1
+        }
+        if (char.isSoftSpeechBreak()) {
+            lastSoftBreakIndex = index
+        }
+        if (char.isHardSpeechBreak()) {
+            lastHardBreakIndex = index
+            if (meaningfulCount >= SPEECH_SEGMENT_TARGET_CHAR_COUNT) {
                 return index
             }
         }
-        return end - 1
+        if (meaningfulCount >= SPEECH_SEGMENT_TARGET_CHAR_COUNT && char.isSoftSpeechBreak()) {
+            return index
+        }
+        if (meaningfulCount >= SPEECH_SEGMENT_MAX_CHAR_COUNT) {
+            return when {
+                lastSoftBreakIndex >= 0 -> lastSoftBreakIndex
+                lastHardBreakIndex >= 0 -> lastHardBreakIndex
+                else -> index
+            }
+        }
+    }
+
+    return if (force) {
+        lastHardBreakIndex.takeIf { it >= 0 } ?: lastSoftBreakIndex.takeIf { it >= 0 } ?: length - 1
+    } else {
+        -1
     }
 }
+
+private fun Char.isMeaningfulSpeechChar(): Boolean = isLetterOrDigit()
+
+private fun Char.isHardSpeechBreak(): Boolean = this in setOf('。', '！', '？', '!', '?', '；', ';', '\n')
+
+private fun Char.isSoftSpeechBreak(): Boolean = this in setOf('，', ',', '、', ' ', '：', ':')

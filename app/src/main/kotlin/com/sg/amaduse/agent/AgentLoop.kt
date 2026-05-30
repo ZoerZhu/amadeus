@@ -134,7 +134,7 @@ internal suspend fun runAgentLoop(
 
         // If no tool calls, we're done
         if (toolCalls.isEmpty()) {
-            if (content.isNotBlank()) {
+            if (content.isNotEmpty()) {
                 withContext(Dispatchers.Main) { onContent(content) }
             }
             return@withContext null
@@ -150,7 +150,7 @@ internal suspend fun runAgentLoop(
         )
 
         // Stream partial content if any
-        if (content.isNotBlank()) {
+        if (content.isNotEmpty()) {
             withContext(Dispatchers.Main) { onContent(content) }
         }
 

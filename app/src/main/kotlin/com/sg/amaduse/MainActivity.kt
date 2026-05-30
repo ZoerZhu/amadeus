@@ -2,6 +2,8 @@ package com.sg.amaduse
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,6 +12,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.View
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -98,6 +101,7 @@ import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Computer
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Image
@@ -183,6 +187,7 @@ import com.sg.amaduse.agent.tools.SetAlarmTool
 import com.sg.amaduse.agent.tools.TestEmotionTool
 import com.sg.amaduse.agent.tools.TestVoiceTool
 import com.sg.amaduse.agent.tools.ToolRegistry
+import com.sg.amaduse.agent.tools.WebSearchTool
 import com.sg.amaduse.ui.theme.AmaduseMotion
 import com.sg.amaduse.ui.theme.AmaduseStyle
 import com.sg.amaduse.ui.theme.AmaduseTheme
@@ -247,6 +252,7 @@ private fun AmaduseApp() {
     var toolsVisible by remember { mutableStateOf(false) }
     var characterExpanded by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
+    var live2dCanvasReady by remember { mutableStateOf(false) }
     val attachments = remember { mutableStateListOf<ComposerAttachment>() }
     val messages = remember(context) {
         mutableStateListOf<ChatMessage>().apply {
@@ -321,6 +327,17 @@ private fun AmaduseApp() {
                 }
             }
             webViewClient = WebViewClient()
+            addJavascriptInterface(
+                object {
+                    @JavascriptInterface
+                    fun onCanvasReady() {
+                        post {
+                            live2dCanvasReady = true
+                        }
+                    }
+                },
+                "AmaduseAndroid",
+            )
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.allowFileAccess = true
@@ -342,12 +359,11 @@ private fun AmaduseApp() {
             live2dWebView = live2dWebView,
             requestCalendarPermissions = requestCalendarPermissions,
         )
-        if (ToolRegistry.all().isEmpty()) {
-            ToolRegistry.register(TestVoiceTool())
-            ToolRegistry.register(TestEmotionTool())
-            ToolRegistry.register(SetAlarmTool())
-            ToolRegistry.register(AddMemoTool())
-        }
+        ToolRegistry.register(TestVoiceTool())
+        ToolRegistry.register(TestEmotionTool())
+        ToolRegistry.register(SetAlarmTool())
+        ToolRegistry.register(AddMemoTool())
+        ToolRegistry.register(WebSearchTool())
         ctx
     }
 
@@ -584,6 +600,147 @@ private fun AmaduseApp() {
                 },
                 onDismiss = { deleteConfirmRecord = null },
             )
+
+            AnimatedVisibility(
+                visible = !live2dCanvasReady,
+                exit = fadeOut(tween(AmaduseMotion.Slow)),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                StartupLoadingOverlay()
+            }
+        }
+    }
+}
+
+@Composable
+private fun StartupLoadingOverlay() {
+    val dark = isSystemInDarkTheme()
+    val transition = rememberInfiniteTransition(label = "startup-loading")
+    val rotation by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(animation = tween(1400, easing = LinearEasing)),
+        label = "startup-ring",
+    )
+    val pulse by transition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(980, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "startup-pulse",
+    )
+    val scanAlpha by transition.animateFloat(
+        initialValue = 0.12f,
+        targetValue = 0.34f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1250, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "startup-scan",
+    )
+    val background = if (dark) {
+        Brush.verticalGradient(
+            listOf(Color(0xFF080809), Color(0xFF121416), Color(0xFF09090B)),
+        )
+    } else {
+        Brush.verticalGradient(
+            listOf(Color(0xFFF7F7F5), Color(0xFFE8ECEF), Color(0xFFF2F5F4)),
+        )
+    }
+    val ink = MaterialTheme.colorScheme.onSurface
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(background)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = {},
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = scanAlpha },
+            verticalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            repeat(14) {
+                Spacer(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(ink.copy(alpha = 0.12f)),
+                )
+            }
+        }
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(132.dp)
+                    .glassLayer(shape = CircleShape, dark = dark),
+                contentAlignment = Alignment.Center,
+            ) {
+                Canvas(
+                    modifier = Modifier
+                        .size(86.dp)
+                        .rotate(rotation),
+                ) {
+                    val radius = size.minDimension / 2f
+                    drawCircle(
+                        color = ink.copy(alpha = 0.08f + pulse * 0.08f),
+                        radius = radius * (0.58f + pulse * 0.16f),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.4.dp.toPx()),
+                    )
+                    drawArc(
+                        color = ink.copy(alpha = 0.72f),
+                        startAngle = 18f,
+                        sweepAngle = 105f,
+                        useCenter = false,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                            width = 3.dp.toPx(),
+                            cap = StrokeCap.Round,
+                        ),
+                    )
+                    drawArc(
+                        color = ink.copy(alpha = 0.26f),
+                        startAngle = 205f,
+                        sweepAngle = 78f,
+                        useCenter = false,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                            width = 2.dp.toPx(),
+                            cap = StrokeCap.Round,
+                        ),
+                    )
+                }
+                StatusDot(active = true)
+            }
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = "AMADUSE",
+                    color = ink,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                )
+                Text(
+                    text = "正在载入画布",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
@@ -2237,58 +2394,123 @@ private fun AgentMessage(
         verticalAlignment = Alignment.Top,
     ) {
         Column(
-            modifier = Modifier
-                .widthIn(max = 328.dp)
-                .chatBubbleLayer(
-                    shape = shape,
-                    dark = isSystemInDarkTheme(),
-                )
-                .padding(horizontal = 13.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.Start,
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = message.author,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 328.dp)
+                    .chatBubbleLayer(
+                        shape = shape,
+                        dark = isSystemInDarkTheme(),
+                    )
+                    .padding(horizontal = 13.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = message.author,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = message.time,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                ThinkingTraceCard(
+                    thinking = message.thinking,
+                    visible = message.showThinking,
+                    expanded = message.thinkingExpanded,
+                    mode = message.mode,
+                    streaming = message.streaming,
+                    onToggle = onToggleThinking,
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = message.time,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            }
-            ThinkingTraceCard(
-                thinking = message.thinking,
-                visible = message.showThinking,
-                expanded = message.thinkingExpanded,
-                mode = message.mode,
-                streaming = message.streaming,
-                onToggle = onToggleThinking,
-            )
-            message.activeToolName?.let { toolName ->
-                ToolCallLoadingLine(toolName = toolName)
+                message.activeToolName?.let { toolName ->
+                    ToolCallLoadingLine(toolName = toolName)
+                }
+                if (message.text.isNotBlank()) {
+                    MarkdownMessageText(
+                        text = message.text,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                } else if (message.streaming) {
+                    StreamingLinePlaceholder()
+                }
+                message.toolPreview?.let {
+                    ToolConfirmationCard(tool = it)
+                }
+                if (message.attachments.isNotEmpty()) {
+                    AttachmentRow(attachments = message.attachments)
+                }
             }
             if (message.text.isNotBlank()) {
-                Text(
+                MessageActionRow(
                     text = message.text,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    style = MaterialTheme.typography.bodyLarge,
-                    lineHeight = 24.sp,
+                    modifier = Modifier
+                        .widthIn(max = 328.dp)
+                        .padding(start = 4.dp, top = 4.dp),
                 )
-            } else if (message.streaming) {
-                StreamingLinePlaceholder()
-            }
-            message.toolPreview?.let {
-                ToolConfirmationCard(tool = it)
-            }
-            if (message.attachments.isNotEmpty()) {
-                AttachmentRow(attachments = message.attachments)
             }
         }
     }
+}
+
+@Composable
+private fun MessageActionRow(
+    text: String,
+    modifier: Modifier = Modifier,
+    horizontalArrangement: Arrangement.Horizontal = Arrangement.Start,
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = horizontalArrangement,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        MessageCopyButton(text = text)
+    }
+}
+
+@Composable
+private fun MessageCopyButton(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    var copied by remember { mutableStateOf(false) }
+
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(1_100L)
+            copied = false
+        }
+    }
+
+    IconButton(
+        onClick = {
+            copyMessageText(context, text)
+            copied = true
+        },
+        enabled = text.isNotBlank(),
+        modifier = modifier.size(30.dp),
+        colors = IconButtonDefaults.iconButtonColors(
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+        ),
+    ) {
+        Icon(
+            imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+            contentDescription = if (copied) "已复制" else "复制",
+            modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
+private fun copyMessageText(context: Context, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("Amaduse message", text))
 }
 
 @Composable
@@ -2454,22 +2676,33 @@ private fun UserMessage(message: ChatMessage) {
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
+                MarkdownMessageText(
                     text = message.text,
-                    style = MaterialTheme.typography.bodyLarge,
-                    lineHeight = 23.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
                 if (message.attachments.isNotEmpty()) {
                     AttachmentRow(attachments = message.attachments)
                 }
             }
         }
-        Text(
-            text = message.time,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(end = 8.dp),
-        )
+        Row(
+            modifier = Modifier
+                .widthIn(max = 308.dp)
+                .padding(end = 4.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            MessageActionRow(
+                text = message.text,
+                horizontalArrangement = Arrangement.End,
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = message.time,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
     }
 }
 
@@ -3332,7 +3565,7 @@ private fun SettingsSheet(
                             icon = Icons.Rounded.Bolt,
                         )
                         Text(
-                            text = "同步开启时，会先收完整模型回复，翻译并生成日语语音后，再让文本流式显示并同时播放语音。",
+                            text = "同步开启时，会按约 50 个非符号字符分段翻译并生成语音，文本随对应语音流式显示；后续分段会提前合成并按顺序播放。",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall,
                             lineHeight = 18.sp,

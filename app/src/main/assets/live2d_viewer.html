@@ -81,6 +81,20 @@
       console.error("[AmaduseLive2D] " + message);
     }
 
+    function notifyCanvasReady() {
+      if (window.__amaduseCanvasReady) {
+        return;
+      }
+      window.__amaduseCanvasReady = true;
+      try {
+        if (window.AmaduseAndroid && window.AmaduseAndroid.onCanvasReady) {
+          window.AmaduseAndroid.onCanvasReady();
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
     function resizePresenter(app) {
       const width = app.renderer.width;
       const height = app.renderer.height;
@@ -168,6 +182,10 @@
       app.stage.addChild(model);
       fitModel(app, model);
       presentWebglFrame(app);
+      requestAnimationFrame(() => {
+        presentWebglFrame(app);
+        notifyCanvasReady();
+      });
 
       let stableWidth = app.renderer.width;
       let stableHeight = app.renderer.height;

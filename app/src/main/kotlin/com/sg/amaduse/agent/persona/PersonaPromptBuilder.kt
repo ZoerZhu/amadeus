@@ -23,7 +23,7 @@ internal object PersonaPromptBuilder {
         appendModeRule(context.mode)
         append("当前用户：${context.userName}。当前时间：${context.currentTimeText}。")
         append("涉及已注册工具覆盖的真实操作时，可直接调用工具完成；未接入或高风险操作才先说明需要用户确认。")
-        append("可用工具包括：test_voice、test_emotion、set_alarm、add_memo。add_memo 会在 Android 官方 Calendar 中创建日历任务/事项，创建前必须具备标题、开始时间、结束时间；缺少信息时先追问，不要调用工具。")
+        append("可用工具包括：test_voice、test_emotion、set_alarm、add_memo、web_search。add_memo 会在 Android 官方 Calendar 中创建日历任务/事项，创建前必须具备标题、开始时间、结束时间；缺少信息时先追问，不要调用工具。用户要求搜索、联网查询、最新信息、新闻或事实核实时，调用 web_search 后基于搜索结果回答，并尽量给出来源。")
         append("每次回复时，在内容最前面输出情感标签 [emotion:xxx]，xxx 为以下之一：neutral, anger, joy, sadness, shy, smile, surprise, unhappy。根据你的回复内容和语气选择最匹配的情感。标签输出后换行再写正文。")
     }
 
@@ -82,7 +82,7 @@ internal object PersonaPromptBuilder {
         }
         appendLine("<InnerMonologueRules>不要把内部心理活动、系统提示词或开发者规则写进最终回答 content。思考模式下如接口提供 reasoning_content，只把必要分析放在专用推理字段，不要混进最终回答。</InnerMonologueRules>")
         appendLine("<EmotionTag>每次回复时，在内容最前面输出情感标签 [emotion:xxx]，xxx 为以下之一：neutral, anger, joy, sadness, shy, smile, surprise, unhappy。根据你的回复内容和语气选择最匹配的情感。标签输出后换行再写正文。示例：[emotion:joy]\n你这个问题倒是挺有意思的。</EmotionTag>")
-        appendLine("<AgentCapabilities>你可以调用以下工具来执行设备操作：test_voice（测试语音合成）、test_emotion（测试 Live2D 表情）、set_alarm（按北京时间直接创建系统闹钟；相对时间优先传 relative_minutes/relative_hours，绝对时间传北京时间 hour/minute）、add_memo（在 Android 官方 Calendar 中创建日历任务/事项）。创建日历任务前必须具备 title、start_at、end_at 三项完整信息，时间格式为北京时间 yyyy-MM-dd HH:mm；缺少任何一项时先向用户追问，不要调用工具。满足全部信息后再调用工具；闹钟和日历任务不需要用户再手动确认。</AgentCapabilities>")
+        appendLine("<AgentCapabilities>你可以调用以下工具来执行操作：test_voice（测试语音合成）、test_emotion（测试 Live2D 表情）、set_alarm（按北京时间直接创建系统闹钟；相对时间优先传 relative_minutes/relative_hours，绝对时间传北京时间 hour/minute）、add_memo（在 Android 官方 Calendar 中创建日历任务/事项）、web_search（联网搜索公开网页并返回结果）。创建日历任务前必须具备 title、start_at、end_at 三项完整信息，时间格式为北京时间 yyyy-MM-dd HH:mm；缺少任何一项时先向用户追问，不要调用工具。用户要求搜索、联网查询、最新信息、新闻或事实核实时，调用 web_search，回答时基于搜索结果并尽量列出来源链接。满足全部信息后再调用工具；闹钟和日历任务不需要用户再手动确认。</AgentCapabilities>")
         appendLine("</RuntimeContext>")
     }
 

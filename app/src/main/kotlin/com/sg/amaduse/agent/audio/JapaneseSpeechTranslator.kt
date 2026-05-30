@@ -13,15 +13,15 @@ internal object JapaneseSpeechTranslator {
         config: SpeechTranslationConfig,
         text: String,
     ): String {
-        val cleaned = text.trim()
+        val cleaned = text.toSpeechSourceText()
         if (cleaned.isBlank() || cleaned.hasJapaneseKana()) {
-            return cleaned
+            return cleaned.toTtsInputText()
         }
         if (!config.useRemote || !config.providerCompatible) {
-            return cleaned
+            return cleaned.toTtsInputText()
         }
         if (config.apiKey.isBlank() && !config.providerName.equals("Ollama", ignoreCase = true)) {
-            return cleaned
+            return cleaned.toTtsInputText()
         }
 
         val endpoint = "${config.baseUrl.trim().trimEnd('/')}/chat/completions"
@@ -43,7 +43,7 @@ internal object JapaneseSpeechTranslator {
                         .put("role", "system")
                         .put(
                             "content",
-                            "你是专业翻译助手。把输入翻译成自然口语日语，只返回日语译文，不要解释，不要添加括号注释。",
+                            "你是专业翻译助手。把输入翻译成自然口语日语，只返回适合 TTS 直接朗读的日语译文。不要解释，不要 Markdown，不要编号、项目符号、引号、括号、emoji、URL。句子之间只使用：、，、。等自然停顿符号。",
                         ),
                 )
                 .put(JSONObject().put("role", "user").put("content", cleaned))
@@ -74,11 +74,12 @@ internal object JapaneseSpeechTranslator {
                 ?.optJSONObject("message")
                 .cleanString("content")
                 .cleanDisplayText()
+                .toTtsInputText()
                 .trim()
-                .ifBlank { cleaned }
+                .ifBlank { cleaned.toTtsInputText() }
         } catch (error: Exception) {
             Log.w("AmaduseVoice", "Japanese translation failed: ${error.message}", error)
-            cleaned
+            cleaned.toTtsInputText()
         } finally {
             connection.disconnect()
         }
